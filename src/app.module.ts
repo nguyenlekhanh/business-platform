@@ -8,6 +8,7 @@ import { LoggingModule } from './common/logging/logging.module';
 import { RedisModule } from './common/redis/redis.module';
 import { TenantContextModule } from './common/tenant-context/tenant-context.module';
 import { HealthModule } from './health/health.module';
+import { RbacModule } from './rbac/rbac.module';
 import { TenantModule } from './tenant/tenant.module';
 import { validateEnv } from './common/config/env.validation';
 
@@ -25,6 +26,7 @@ import { validateEnv } from './common/config/env.validation';
     HealthModule,
     AuthModule,
     TenantModule,
+    RbacModule,
   ],
   providers: [
     {

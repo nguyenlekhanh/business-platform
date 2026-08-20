@@ -3,6 +3,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 interface TenantContextState {
   tenantId: string;
+  /** Per-request scratch space (e.g. permission memoization). */
+  memo?: Map<string, unknown>;
 }
 
 /**
@@ -30,5 +32,26 @@ export class TenantContextService {
       );
     }
     return tenantId;
+  }
+
+  /**
+   * Returns the per-request memo map, creating it lazily. The memo lives on
+   * the AsyncLocalStorage store, so it is scoped to the current request and
+   * can never leak across requests. Returns undefined outside a context.
+   */
+  getMemo(): Map<string, unknown> | undefined {
+    const store = this.storage.getStore();
+    if (!store) {
+      return undefined;
+    }
+    if (!store.memo) {
+      store.memo = new Map<string, unknown>();
+    }
+    return store.memo;
+  }
+
+  /** Clears the per-request memo (called after RBAC mutations). */
+  clearMemo(): void {
+    this.storage.getStore()?.memo?.clear();
   }
 }

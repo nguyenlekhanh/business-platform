@@ -1,0 +1,160 @@
+/**
+ * Platform-wide permission catalog and system role definitions.
+ *
+ * Permission keys use the `resource:action` format. The catalog is
+ * platform-defined: tenants can assign permissions from this catalog to custom
+ * roles but can never create new permissions. System roles are seeded per
+ * tenant (see scripts/seed-rbac.ts) and are immutable at the application layer.
+ */
+export const PERMISSIONS = {
+  STORE_READ: 'store:read',
+  STORE_CREATE: 'store:create',
+  STORE_UPDATE: 'store:update',
+  STORE_DELETE: 'store:delete',
+  STORE_MANAGE: 'store:manage',
+  MEMBER_READ: 'member:read',
+  MEMBER_MANAGE: 'member:manage',
+  ROLE_READ: 'role:read',
+  ROLE_MANAGE: 'role:manage',
+  SETTINGS_READ: 'settings:read',
+  SETTINGS_MANAGE: 'settings:manage',
+  REPORT_READ: 'report:read',
+} as const;
+
+export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
+
+export const PERMISSION_CATEGORIES = {
+  STORE: 'store',
+  MEMBERS: 'members',
+  RBAC: 'rbac',
+  SETTINGS: 'settings',
+  REPORTING: 'reporting',
+} as const;
+
+export interface PermissionDefinition {
+  key: string;
+  name: string;
+  category: string;
+  description?: string;
+}
+
+export const PERMISSION_DEFINITIONS: readonly PermissionDefinition[] = [
+  {
+    key: PERMISSIONS.STORE_READ,
+    name: 'Read stores',
+    category: PERMISSION_CATEGORIES.STORE,
+    description: 'View store records in the tenant',
+  },
+  {
+    key: PERMISSIONS.STORE_CREATE,
+    name: 'Create stores',
+    category: PERMISSION_CATEGORIES.STORE,
+    description: 'Create stores in the tenant',
+  },
+  {
+    key: PERMISSIONS.STORE_UPDATE,
+    name: 'Update stores',
+    category: PERMISSION_CATEGORIES.STORE,
+    description: 'Update stores in the tenant',
+  },
+  {
+    key: PERMISSIONS.STORE_DELETE,
+    name: 'Delete stores',
+    category: PERMISSION_CATEGORIES.STORE,
+    description: 'Delete stores in the tenant',
+  },
+  {
+    key: PERMISSIONS.STORE_MANAGE,
+    name: 'Manage stores',
+    category: PERMISSION_CATEGORIES.STORE,
+    description: 'Full store management in the tenant',
+  },
+  {
+    key: PERMISSIONS.MEMBER_READ,
+    name: 'Read members',
+    category: PERMISSION_CATEGORIES.MEMBERS,
+    description: 'View tenant members',
+  },
+  {
+    key: PERMISSIONS.MEMBER_MANAGE,
+    name: 'Manage members',
+    category: PERMISSION_CATEGORIES.MEMBERS,
+    description: 'Manage memberships and their roles',
+  },
+  {
+    key: PERMISSIONS.ROLE_READ,
+    name: 'Read roles',
+    category: PERMISSION_CATEGORIES.RBAC,
+    description: 'View roles and their permissions',
+  },
+  {
+    key: PERMISSIONS.ROLE_MANAGE,
+    name: 'Manage roles',
+    category: PERMISSION_CATEGORIES.RBAC,
+    description: 'Create, update, delete roles and assign permissions',
+  },
+  {
+    key: PERMISSIONS.SETTINGS_READ,
+    name: 'Read settings',
+    category: PERMISSION_CATEGORIES.SETTINGS,
+    description: 'View tenant settings',
+  },
+  {
+    key: PERMISSIONS.SETTINGS_MANAGE,
+    name: 'Manage settings',
+    category: PERMISSION_CATEGORIES.SETTINGS,
+    description: 'Update tenant settings',
+  },
+  {
+    key: PERMISSIONS.REPORT_READ,
+    name: 'Read reports',
+    category: PERMISSION_CATEGORIES.REPORTING,
+    description: 'View tenant reports',
+  },
+];
+
+export const SYSTEM_ROLE_KEYS = {
+  OWNER: 'owner',
+  ADMIN: 'admin',
+  EMPLOYEE: 'employee',
+} as const;
+
+export interface SystemRoleDefinition {
+  key: string;
+  name: string;
+  description?: string;
+  defaultPermissions: readonly string[];
+}
+
+/**
+ * System roles are seeded per tenant and are immutable at the application
+ * layer. The owner role has a semantic "all permissions" rule in
+ * PermissionService and therefore carries no explicit grants.
+ */
+export const SYSTEM_ROLE_DEFINITIONS: readonly SystemRoleDefinition[] = [
+  {
+    key: SYSTEM_ROLE_KEYS.OWNER,
+    name: 'Owner',
+    description: 'Full control over the tenant (all permissions)',
+    defaultPermissions: [],
+  },
+  {
+    key: SYSTEM_ROLE_KEYS.ADMIN,
+    name: 'Admin',
+    description: 'Tenant administration',
+    defaultPermissions: [
+      PERMISSIONS.ROLE_READ,
+      PERMISSIONS.ROLE_MANAGE,
+      PERMISSIONS.MEMBER_MANAGE,
+      PERMISSIONS.SETTINGS_MANAGE,
+      PERMISSIONS.STORE_MANAGE,
+      PERMISSIONS.REPORT_READ,
+    ],
+  },
+  {
+    key: SYSTEM_ROLE_KEYS.EMPLOYEE,
+    name: 'Employee',
+    description: 'Baseline operational access',
+    defaultPermissions: [PERMISSIONS.STORE_READ],
+  },
+];

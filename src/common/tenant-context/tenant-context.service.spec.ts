@@ -48,4 +48,30 @@ describe('TenantContextService', () => {
       InternalServerErrorException,
     );
   });
+
+  it('provides a per-request memo inside run() and clears it', () => {
+    service.run('tenant-1', () => {
+      const memo = service.getMemo();
+      expect(memo).toBeDefined();
+      memo?.set('k', 'v');
+      expect(service.getMemo()?.get('k')).toBe('v');
+      service.clearMemo();
+      expect(service.getMemo()?.has('k')).toBe(false);
+    });
+  });
+
+  it('returns the same memo within one request and different memos across requests', () => {
+    service.run('tenant-1', () => {
+      const first = service.getMemo();
+      const second = service.getMemo();
+      expect(first).toBe(second);
+    });
+    service.run('tenant-2', () => {
+      expect(service.getMemo()?.size ?? 0).toBe(0);
+    });
+  });
+
+  it('is undefined outside run()', () => {
+    expect(service.getMemo()).toBeUndefined();
+  });
 });
