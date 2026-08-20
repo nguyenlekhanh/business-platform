@@ -7,6 +7,156 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// No models yet. This schema establishes the database connection layer only.
-// Business domains (auth, users, tenants, products, orders, ...) will add
-// their models here in later phases.
+// ---------- enums ----------
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+}
+
+enum StoreType {
+  GENERAL
+  SHOP
+  CAFE
+  RESTAURANT
+  NAIL_BEAUTY
+  TRAVEL
+  LOGISTICS
+  POS
+}
+
+enum StoreStatus {
+  ACTIVE
+  INACTIVE
+}
+
+// ---------- identity ----------
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique // persisted normalized: lowercase + trimmed (enforced in service layer)
+  passwordHash String? // nullable for future OAuth/SSO/magic-link identities
+  firstName    String?
+  lastName     String?
+  status       UserStatus   @default(ACTIVE)
+  memberships  Membership[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+model Tenant {
+  id          String       @id @default(cuid())
+  name        String
+  slug        String       @unique
+  status      TenantStatus @default(ACTIVE)
+  settings    Json? // generic extension point; never business-specific columns
+  memberships Membership[]
+  roles       Role[]
+  stores      Store[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ---------- membership ----------
+model Membership {
+  id       String           @id @default(cuid())
+  userId   String
+  tenantId String
+  roleId   String // required: "A Membership has a Role"
+  status   MembershipStatus @default(ACTIVE)
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // COMPOSITE FK - DB-level guarantee: a membership can only reference a Role
+  // that belongs to the SAME tenant as the membership.
+  role   Role   @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, tenantId])
+  @@index([tenantId])
+  @@index([roleId])
+}
+
+// ---------- RBAC ----------
+model Role {
+  id          String  @id @default(cuid())
+  tenantId    String // tenant-scoped roles
+  key         String // stable code ("owner", "admin", "employee") - authorization checks keys, never names
+  name        String
+  description String?
+  isSystem    Boolean @default(false) // seeded system role; immutable for tenant admins
+
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  permissions RolePermission[]
+  memberships Membership[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // required composite unique - the target of Membership's composite FK
+  @@unique([tenantId, id])
+  @@unique([tenantId, key])
+  @@index([tenantId])
+}
+
+model Permission {
+  id          String  @id @default(cuid())
+  key         String  @unique // global catalog, platform-defined ("store:read", "order:create", ...)
+  name        String
+  description String?
+  category    String? // grouping: "store", "settings", ...
+
+  roles RolePermission[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  assignedAt DateTime @default(now())
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+}
+
+// ---------- organization (generic business unit) ----------
+model Store {
+  id       String      @id @default(cuid())
+  tenantId String
+  name     String
+  code     String // short code, unique within the tenant
+  type     StoreType   @default(GENERAL) // generic classifier only - carries NO business data
+  status   StoreStatus @default(ACTIVE)
+  settings Json? // generic per-store config; no business-specific fields
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@index([type])
+}
