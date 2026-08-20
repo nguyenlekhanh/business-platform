@@ -14,6 +14,7 @@ import {
   CreateRoleDto,
   UpdateRoleDto,
 } from './dto/role.dto';
+import { assertNotLastActiveOwner } from './last-active-owner';
 import { PermissionService } from './permission.service';
 import { PERMISSIONS, SYSTEM_ROLE_KEYS } from './permission-catalog';
 
@@ -411,13 +412,10 @@ export class RoleService {
   }
 
   /**
-   * Serializes owner demotions with a PostgreSQL row lock. Raw SQL is required
-   * because FOR UPDATE row locking is not expressible through Prisma's query
-   * builder. Raw SQL bypasses the tenant-scoping extension (contract #5), so
-   * the active tenant id is obtained via requireTenantId() and bound as a
-   * parameter — never interpolated — keeping the lock tenant-scoped. The owner
-   * count is re-read inside the same transaction after the lock is acquired,
-   * so two concurrent demotions can never both proceed past the last owner.
+   * Serializes owner demotions with a PostgreSQL row lock (shared helper
+   * assertNotLastActiveOwner). The owner count is re-checked inside the same
+   * transaction after the lock is acquired, so concurrent demotions can never
+   * leave a tenant with zero active owners.
    */
   private demoteOwner(
     membershipId: string,
@@ -425,20 +423,7 @@ export class RoleService {
   ): Promise<{ id: string; roleId: string }> {
     const tenantId = this.tenantContext.requireTenantId();
     return this.prisma.$transaction(async (tx) => {
-      const owners = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-        SELECT "id" FROM "Membership"
-        WHERE "tenantId" = ${tenantId}
-          AND "status" = 'ACTIVE'
-          AND "roleId" IN (
-            SELECT "id" FROM "Role"
-            WHERE "tenantId" = ${tenantId}
-              AND "key" = ${SYSTEM_ROLE_KEYS.OWNER}
-          )
-        FOR UPDATE
-      `);
-      if (owners.length <= 1) {
-        throw new ConflictException(LAST_OWNER);
-      }
+      await assertNotLastActiveOwner(tx, tenantId, LAST_OWNER);
       return tx.membership.update({
         where: { id: membershipId },
         data: { roleId: newRoleId },

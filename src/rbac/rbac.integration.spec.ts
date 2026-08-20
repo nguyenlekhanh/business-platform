@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import type { Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
+import { Prisma } from '@prisma/client';
 import { AppModule } from '../app.module';
 import { PrismaService } from '../common/database/prisma/prisma.service';
 import { TenantContextService } from '../common/tenant-context/tenant-context.service';
@@ -40,7 +41,6 @@ describe('RBAC (integration)', () => {
   const run = `rbac-${Date.now()}-${randomUUID().slice(0, 6)}`;
   const userIdsToDelete: string[] = [];
   const tenantIdsToDelete: string[] = [];
-  const permissionIdsToDelete: string[] = [];
   const roleIdsToDelete: string[] = [];
   const membershipIdsToDelete: string[] = [];
 
@@ -108,19 +108,36 @@ describe('RBAC (integration)', () => {
   });
 
   beforeAll(async () => {
-    // Seed the global permission catalog (idempotent across runs).
+    // Seed the global permission catalog (idempotent across runs, race-safe
+    // against other integration suites seeding the same catalog concurrently).
+    // Permission rows are platform catalog data and are intentionally NOT
+    // deleted in afterAll: they are shared across suites and runs.
     for (const definition of PERMISSION_DEFINITIONS) {
-      const permission = await prisma.permission.upsert({
+      let permission = await prisma.permission.findUnique({
         where: { key: definition.key },
-        update: {},
-        create: {
-          key: definition.key,
-          name: definition.name,
-          category: definition.category,
-          description: definition.description,
-        },
       });
-      permissionIdsToDelete.push(permission.id);
+      if (!permission) {
+        permission = await prisma.permission
+          .create({
+            data: {
+              key: definition.key,
+              name: definition.name,
+              category: definition.category,
+              description: definition.description,
+            },
+          })
+          .catch((error: unknown) => {
+            if (
+              error instanceof Prisma.PrismaClientKnownRequestError &&
+              error.code === 'P2002'
+            ) {
+              return prisma.permission.findUnique({
+                where: { key: definition.key },
+              });
+            }
+            throw error;
+          });
+      }
     }
 
     ownerA = await createUser(`owner-a-${run}@example.com`);
@@ -179,9 +196,6 @@ describe('RBAC (integration)', () => {
         .catch(() => undefined);
       await prisma.tenant
         .deleteMany({ where: { id: { in: tenantIdsToDelete } } })
-        .catch(() => undefined);
-      await prisma.permission
-        .deleteMany({ where: { id: { in: permissionIdsToDelete } } })
         .catch(() => undefined);
     }
     if (app) {
