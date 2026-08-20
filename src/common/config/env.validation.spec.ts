@@ -4,6 +4,7 @@ describe('validateEnv', () => {
   it('applies defaults for optional values', () => {
     const config = validateEnv({
       DATABASE_URL: 'postgresql://app:app@localhost:5432/app?schema=public',
+      JWT_SECRET: 'a-very-long-test-secret-of-at-least-32-characters',
     });
 
     expect(config.NODE_ENV).toBe('development');
@@ -14,6 +15,7 @@ describe('validateEnv', () => {
     expect(config.REDIS_DB).toBe(0);
     expect(config.LOG_LEVEL).toBe('info');
     expect(config.LOG_PRETTY).toBe(true);
+    expect(config.JWT_EXPIRES_IN).toBe('15m');
   });
 
   it('coerces string values into their typed equivalents', () => {
@@ -26,6 +28,8 @@ describe('validateEnv', () => {
       REDIS_DB: '2',
       LOG_LEVEL: 'debug',
       LOG_PRETTY: 'false',
+      JWT_SECRET: 'a-very-long-test-secret-of-at-least-32-characters',
+      JWT_EXPIRES_IN: '1h',
     });
 
     expect(config.NODE_ENV).toBe('production');
@@ -34,6 +38,10 @@ describe('validateEnv', () => {
     expect(config.REDIS_DB).toBe(2);
     expect(config.LOG_LEVEL).toBe('debug');
     expect(config.LOG_PRETTY).toBe(false);
+    expect(config.JWT_SECRET).toBe(
+      'a-very-long-test-secret-of-at-least-32-characters',
+    );
+    expect(config.JWT_EXPIRES_IN).toBe('1h');
   });
 
   it('throws when DATABASE_URL is missing', () => {
@@ -59,7 +67,25 @@ describe('validateEnv', () => {
     expect(() =>
       validateEnv({
         DATABASE_URL: 'postgresql://app:app@localhost:5432/app?schema=public',
+        JWT_SECRET: 'a-very-long-test-secret-of-at-least-32-characters',
         LOG_LEVEL: 'verbose',
+      }),
+    ).toThrow(/Invalid environment configuration/);
+  });
+
+  it('throws when JWT_SECRET is missing', () => {
+    expect(() =>
+      validateEnv({
+        DATABASE_URL: 'postgresql://app:app@localhost:5432/app?schema=public',
+      }),
+    ).toThrow(/Invalid environment configuration/);
+  });
+
+  it('throws when JWT_SECRET is shorter than 32 characters', () => {
+    expect(() =>
+      validateEnv({
+        DATABASE_URL: 'postgresql://app:app@localhost:5432/app?schema=public',
+        JWT_SECRET: 'too-short',
       }),
     ).toThrow(/Invalid environment configuration/);
   });

@@ -28,6 +28,8 @@ export const envValidationSchema: Joi.ObjectSchema<EnvConfig> = Joi.object({
     .valid(...LOG_LEVELS)
     .default('info'),
   LOG_PRETTY: Joi.boolean().default(true),
+  JWT_SECRET: Joi.string().min(32).required(),
+  JWT_EXPIRES_IN: Joi.string().default('15m'),
 });
 
 export interface EnvConfig {
@@ -40,6 +42,8 @@ export interface EnvConfig {
   REDIS_DB: number;
   LOG_LEVEL: LogLevel;
   LOG_PRETTY: boolean;
+  JWT_SECRET: string;
+  JWT_EXPIRES_IN: string;
 }
 
 /**

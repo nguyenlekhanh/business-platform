@@ -9,3 +9,5 @@ process.env.REDIS_PASSWORD = '';
 process.env.REDIS_DB = '0';
 process.env.LOG_LEVEL = 'silent';
 process.env.LOG_PRETTY = 'false';
+process.env.JWT_SECRET = 'test-jwt-secret-of-at-least-32-characters';
+process.env.JWT_EXPIRES_IN = '15m';

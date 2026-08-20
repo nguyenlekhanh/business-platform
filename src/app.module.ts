@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_FILTER } from '@nestjs/core';
+import { AuthModule } from './auth/auth.module';
 import { PrismaModule } from './common/database/prisma/prisma.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { LoggingModule } from './common/logging/logging.module';
@@ -19,6 +20,7 @@ import { validateEnv } from './common/config/env.validation';
     PrismaModule,
     RedisModule,
     HealthModule,
+    AuthModule,
   ],
   providers: [
     {
