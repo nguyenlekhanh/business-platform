@@ -10,6 +10,7 @@ import { TenantContextModule } from './common/tenant-context/tenant-context.modu
 import { HealthModule } from './health/health.module';
 import { MemberModule } from './member/member.module';
 import { RbacModule } from './rbac/rbac.module';
+import { TenantAdminModule } from './tenant-admin/tenant-admin.module';
 import { TenantModule } from './tenant/tenant.module';
 import { validateEnv } from './common/config/env.validation';
 
@@ -29,6 +30,7 @@ import { validateEnv } from './common/config/env.validation';
     TenantModule,
     RbacModule,
     MemberModule,
+    TenantAdminModule,
   ],
   providers: [
     {
