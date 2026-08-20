@@ -6,7 +6,9 @@ import { PrismaModule } from './common/database/prisma/prisma.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { LoggingModule } from './common/logging/logging.module';
 import { RedisModule } from './common/redis/redis.module';
+import { TenantContextModule } from './common/tenant-context/tenant-context.module';
 import { HealthModule } from './health/health.module';
+import { TenantModule } from './tenant/tenant.module';
 import { validateEnv } from './common/config/env.validation';
 
 @Module({
@@ -19,8 +21,10 @@ import { validateEnv } from './common/config/env.validation';
     LoggingModule,
     PrismaModule,
     RedisModule,
+    TenantContextModule,
     HealthModule,
     AuthModule,
+    TenantModule,
   ],
   providers: [
     {

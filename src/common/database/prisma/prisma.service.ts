@@ -5,6 +5,8 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import { TenantContextService } from '../../tenant-context/tenant-context.service';
+import { applyTenantScoping } from './tenant-scoping.extension';
 
 @Injectable()
 export class PrismaService
@@ -12,6 +14,14 @@ export class PrismaService
   implements OnModuleInit, OnModuleDestroy
 {
   private readonly logger = new Logger(PrismaService.name);
+
+  constructor(tenantContext: TenantContextService) {
+    super();
+    // Prisma 6 exposes $extends only as an instance method, so the extension
+    // is built here and its scoped operations are copied onto this instance.
+    // Model namespaces are plain own properties on the extended client.
+    applyTenantScoping(this, tenantContext);
+  }
 
   async onModuleInit(): Promise<void> {
     try {

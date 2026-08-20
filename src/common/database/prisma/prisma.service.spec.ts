@@ -1,5 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { PrismaClient } from '@prisma/client';
+import { TenantContextService } from '../../tenant-context/tenant-context.service';
 import { PrismaService } from './prisma.service';
 
 const mockConnect = jest.fn().mockResolvedValue(undefined);
@@ -9,6 +10,7 @@ jest.mock('@prisma/client', () => {
   class MockPrismaClient {
     $connect = mockConnect;
     $disconnect = mockDisconnect;
+    $extends = jest.fn(() => new MockPrismaClient());
   }
   return { PrismaClient: MockPrismaClient };
 });
@@ -18,7 +20,7 @@ describe('PrismaService', () => {
 
   beforeEach(async () => {
     const moduleRef = await Test.createTestingModule({
-      providers: [PrismaService],
+      providers: [PrismaService, TenantContextService],
     }).compile();
 
     service = moduleRef.get(PrismaService);
