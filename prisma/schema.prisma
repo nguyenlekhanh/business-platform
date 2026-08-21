@@ -41,6 +41,165 @@ enum StoreStatus {
   INACTIVE
 }
 
+// ---------- assets (generic equipment / resource foundation) ----------
+// Generic, tenant-scoped physical/business resource. Deliberately has NO
+// rental/booking/invoice fields — those belong to future business modules.
+// `type` is a free-form string so any vertical (crane, POS terminal, etc.)
+// can be represented without a schema migration.
+enum AssetStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Asset {
+  id          String  @id @default(cuid())
+  tenantId    String
+  name        String
+  code        String // short code, unique within the tenant
+  type        String // free-form category (crane, vehicle, terminal, ...)
+  description String?
+  status      AssetStatus @default(ACTIVE)
+  settings    Json? // generic per-asset config; no business-specific fields
+  storeId     String?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // Optional Store must belong to the SAME tenant. Read scoping (tenant-scoping
+  // extension) and application-layer validation enforce cross-tenant storeId
+  // rejection (resolves to null -> 404); the extension injects `tenantId`
+  // from TenantContext on every write so it can never be set from payload.
+  store  Store? @relation(fields: [storeId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  // Phase 2J keyset pagination: ordered scan on (createdAt, id) within the
+  // tenant avoids a per-page sort and seeks past the cursor tuple.
+  @@index([tenantId, createdAt, id])
+  @@index([storeId])
+  equipment Equipment?
+}
+
+// ---------- equipment (rentable equipment identity on top of Asset) ----------
+// 1:1 specialization of a generic Asset for physical rentable equipment
+// (crane, excavator, forklift). Kept in its own model so the generic Asset
+// foundation stays free of equipment-specific columns. Identity fields only -
+// no rental workflow data (bookings/contracts/pricing belong to future
+// modules).
+enum EquipmentType {
+  CRANE
+  EXCAVATOR
+  FORKLIFT
+}
+
+model Equipment {
+  id       String        @id @default(cuid())
+  tenantId String
+  // 1:1 link to a same-tenant Asset; the globally unique assetId guarantees
+  // at most one equipment record per asset. Deleting the Asset cascades here.
+  assetId  String        @unique
+  type     EquipmentType
+
+  manufacturer String? // free-form make designation
+  model        String? // free-form model designation
+  serialNumber String? // unique within the tenant when present
+  year         Int?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // The application layer resolves assetId through a tenant-scoped Asset lookup,
+  // so a cross-tenant or unknown asset is rejected (404) before any write;
+  // DB-level consistency is additionally backed by this foreign key.
+  asset  Asset  @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, serialNumber])
+  @@index([tenantId])
+  // Phase 2J keyset pagination (see Asset).
+  @@index([tenantId, createdAt, id])
+  reservations Reservation[]
+}
+
+// ---------- customers (rental counterparties) ----------
+// Tenant-scoped registry of rental counterparties. Identity/contact fields
+// only - no booking/rental data (reservations/pricing belong to future
+// modules). Email is deliberately NOT unique: a global unique constraint
+// would leak cross-tenant existence.
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Customer {
+  id       String         @id @default(uuid())
+  tenantId String
+  name     String
+  code     String // short code, unique within the tenant
+  email    String?
+  phone    String?
+  notes    String?
+  status   CustomerStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  // Phase 2J keyset pagination (see Asset).
+  @@index([tenantId, createdAt, id])
+  reservations Reservation[]
+}
+
+// ---------- reservations (time-bound holds on rentable equipment) ----------
+// One reservation holds ONE Equipment item for ONE Customer over a half-open
+// [startAt, endAt) UTC interval. No pricing/invoice/pickup/return data - those
+// belong to future modules. ACTIVE/COMPLETED are declared for the upcoming
+// rental workflow but are unreachable through the API in this phase.
+// NOTE: the database adds a btree_gist EXCLUDE constraint and a CHECK
+// constraint (see migration 20260821020000_add_reservation_domain) that the
+// Prisma schema DSL cannot express. Deploy-only migration discipline is
+// mandatory: `prisma migrate dev/diff` would try to drop them.
+enum ReservationStatus {
+  RESERVED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+model Reservation {
+  id          String            @id @default(uuid())
+  tenantId    String
+  customerId  String
+  equipmentId String
+  startAt     DateTime
+  endAt       DateTime
+  status      ReservationStatus @default(RESERVED)
+  notes       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // Business history must survive counterparty removal: RESTRICT blocks
+  // deleting a Customer that still has reservations (application layer maps
+  // the resulting P2003 to 409).
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  // Same protection for the rented item: an Asset/Equipment with reservations
+  // cannot be deleted (the Asset->Equipment cascade is blocked by RESTRICT).
+  equipment Equipment @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId])
+  @@index([equipmentId, startAt])
+  // Phase 2J keyset pagination: default (createdAt, id) order plus the
+  // approved sortBy=startAt alternative.
+  @@index([tenantId, createdAt, id])
+  @@index([tenantId, startAt, id])
+}
+
 // ---------- identity ----------
 model User {
   id           String       @id @default(cuid())
@@ -50,11 +209,31 @@ model User {
   lastName     String?
   status       UserStatus   @default(ACTIVE)
   memberships  Membership[]
+  refreshTokens RefreshToken[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([status])
+}
+
+// ---------- refresh tokens (auth session rotation) ----------
+// One row per issued refresh token. Only the sha256 hash of the token
+// material is ever persisted — never the raw token. Rotation marks the old
+// row revokedAt; rows are retained for reuse detection.
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
 }
 
 model Tenant {
@@ -66,6 +245,10 @@ model Tenant {
   memberships Membership[]
   roles       Role[]
   stores      Store[]
+  assets      Asset[]
+  equipments  Equipment[]
+  customers   Customer[]
+  reservations Reservation[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -158,5 +341,8 @@ model Store {
 
   @@unique([tenantId, code])
   @@index([tenantId])
+  // Phase 2J keyset pagination (see Asset).
+  @@index([tenantId, createdAt, id])
   @@index([type])
+  assets Asset[]
 }

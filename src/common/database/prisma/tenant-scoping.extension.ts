@@ -11,6 +11,10 @@ const TENANT_SCOPED_MODELS = new Set<Prisma.ModelName>([
   'Membership',
   'Role',
   'Store',
+  'Asset',
+  'Equipment',
+  'Customer',
+  'Reservation',
 ]);
 
 interface MutableOperationArgs {
@@ -71,7 +75,8 @@ function scopeArgs(operation: string, args: unknown, tenantId: string): void {
  *
  * ── SECURITY CONTRACTS ─────────────────────────────────────────────────────
  *
- * 1. Tenant-scoped models (Membership, Role, Store)
+ * 1. Tenant-scoped models (Membership, Role, Store, Asset, Equipment, Customer,
+ *    Reservation)
  *    These are tenant-owned. Every top-level read/write on them is scoped to
  *    the active TenantContext tenant id; a call without a TenantContext fails
  *    closed (InternalServerErrorException). Never silently falls back to an

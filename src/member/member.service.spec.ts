@@ -4,51 +4,42 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/database/prisma/prisma.service';
 import { TenantContextService } from '../common/tenant-context/tenant-context.service';
+import { PERMISSIONS, SYSTEM_ROLE_KEYS } from '../rbac/permission-catalog';
 import { PermissionService } from '../rbac/permission.service';
+import { CreateMemberDto } from './dto/create-member.dto';
 import { MemberService } from './member.service';
 
-describe('MemberService', () => {
+const DEFAULT_ROLE_NOT_FOUND = 'Default role not found';
+
+describe('MemberService.createMember', () => {
   let service: MemberService;
   let tenantContext: TenantContextService;
+  let permissionService: {
+    assertPermissions: jest.Mock;
+    getPermissions: jest.Mock;
+    clearMemo: jest.Mock;
+  };
 
-  const mockFindMany = jest.fn();
-  const mockFindUnique = jest.fn();
-  const mockUpdate = jest.fn();
-  const mockTransaction = jest.fn<
-    Promise<unknown>,
-    [(tx: TxClient) => Promise<unknown>]
-  >();
-  const mockQueryRaw = jest.fn();
-  const mockAssertPermissions = jest.fn();
-  const mockClearMemo = jest.fn();
-
-  interface TxClient {
-    membership?: { update: typeof mockUpdate };
-    $queryRaw?: typeof mockQueryRaw;
-  }
-
-  const member = (overrides: Record<string, unknown> = {}) => ({
-    id: 'membership-1',
-    userId: 'user-2',
-    status: 'ACTIVE',
-    createdAt: new Date('2024-01-01T00:00:00Z'),
-    updatedAt: new Date('2024-01-01T00:00:00Z'),
-    user: {
-      id: 'user-2',
-      email: 'user-2@example.com',
-      firstName: 'User',
-      lastName: 'Two',
-    },
-    role: { id: 'role-1', key: 'employee', name: 'Employee', isSystem: true },
-    ...overrides,
-  });
+  const mockUserUpsert = jest.fn();
+  const mockRoleFindUnique = jest.fn();
+  const mockRoleFindFirst = jest.fn();
+  const mockMembershipFindUnique = jest.fn();
+  const mockMembershipCreate = jest.fn();
+  const mockTransaction = jest.fn();
 
   beforeEach(async () => {
     jest.clearAllMocks();
 
     tenantContext = new TenantContextService();
+
+    permissionService = {
+      assertPermissions: jest.fn().mockResolvedValue(undefined),
+      getPermissions: jest.fn(),
+      clearMemo: jest.fn(),
+    };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -56,21 +47,19 @@ describe('MemberService', () => {
         {
           provide: PrismaService,
           useValue: {
-            $transaction: mockTransaction,
-            membership: {
-              findMany: mockFindMany,
-              findUnique: mockFindUnique,
-              update: mockUpdate,
+            user: { upsert: mockUserUpsert },
+            role: {
+              findUnique: mockRoleFindUnique,
+              findFirst: mockRoleFindFirst,
             },
+            membership: {
+              findUnique: mockMembershipFindUnique,
+              create: mockMembershipCreate,
+            },
+            $transaction: mockTransaction,
           },
         },
-        {
-          provide: PermissionService,
-          useValue: {
-            assertPermissions: mockAssertPermissions,
-            clearMemo: mockClearMemo,
-          },
-        },
+        { provide: PermissionService, useValue: permissionService },
         { provide: TenantContextService, useValue: tenantContext },
       ],
     }).compile();
@@ -81,218 +70,316 @@ describe('MemberService', () => {
   const runInTenant = <T>(fn: () => Promise<T>): Promise<T> =>
     tenantContext.run('tenant-1', fn);
 
-  describe('listMembers', () => {
-    it('returns member summaries for the tenant', async () => {
-      mockAssertPermissions.mockResolvedValue(undefined);
-      mockFindMany.mockResolvedValue([
-        member(),
-        member({ id: 'membership-2' }),
-      ]);
+  const tenantScopedRole = (overrides: Record<string, unknown> = {}) => ({
+    id: 'role-1',
+    key: SYSTEM_ROLE_KEYS.EMPLOYEE,
+    isSystem: true,
+    ...overrides,
+  });
 
-      const result = await runInTenant(() => service.listMembers('user-1'));
+  const fullMembership = (overrides: Record<string, unknown> = {}) => ({
+    id: 'm-1',
+    userId: 'new-user-1',
+    tenantId: 'tenant-1',
+    user: {
+      id: 'new-user-1',
+      email: 'invite@example.com',
+      firstName: null,
+      lastName: null,
+    },
+    role: {
+      id: 'role-1',
+      key: SYSTEM_ROLE_KEYS.EMPLOYEE,
+      name: 'Employee',
+      isSystem: true,
+    },
+    status: 'ACTIVE',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  });
 
-      expect(result).toHaveLength(2);
-      expect(result[0]).toMatchObject({
-        membershipId: 'membership-1',
-        userId: 'user-2',
-        email: 'user-2@example.com',
-        role: { key: 'employee' },
-        status: 'ACTIVE',
+  const dto = (overrides: Partial<CreateMemberDto> = {}): CreateMemberDto => ({
+    email: 'INVITE@Example.COM',
+    firstName: 'Invite',
+    lastName: 'User',
+    ...overrides,
+  });
+
+  const txClient = {
+    user: { upsert: mockUserUpsert },
+    role: { findUnique: mockRoleFindUnique, findFirst: mockRoleFindFirst },
+    membership: {
+      findUnique: mockMembershipFindUnique,
+      create: mockMembershipCreate,
+    },
+  };
+
+  /** Runs the service call through a $transaction mock that executes the
+   *  callback against txClient, preserving tenant-scoped context. */
+  const withTx = <T>(fn: () => Promise<T>): Promise<T> => {
+    mockTransaction.mockImplementation(
+      async (cb: (tx: typeof txClient) => Promise<unknown>) => cb(txClient),
+    );
+    return fn();
+  };
+
+  describe('permission gate', () => {
+    it('asserts member:manage with ALL mode', async () => {
+      await runInTenant(async () => {
+        mockRoleFindFirst.mockResolvedValue(tenantScopedRole());
+        mockUserUpsert.mockResolvedValue({ id: 'new-user-1' });
+        mockMembershipFindUnique.mockResolvedValue(null);
+        mockMembershipCreate.mockResolvedValue(fullMembership());
+        await withTx(() =>
+          service.createMember('actor-1', dto({ roleId: undefined })),
+        );
       });
-      expect(mockAssertPermissions).toHaveBeenCalledWith('user-1', {
-        mode: 'ALL',
-        permissions: ['member:read'],
-      });
-    });
 
-    it('requires member:read', async () => {
-      mockAssertPermissions.mockRejectedValue(new ForbiddenException());
-
-      await expect(
-        runInTenant(() => service.listMembers('user-1')),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(permissionService.assertPermissions).toHaveBeenCalledWith(
+        'actor-1',
+        { mode: 'ALL', permissions: [PERMISSIONS.MEMBER_MANAGE] },
+      );
     });
   });
 
-  describe('getMember', () => {
-    it('returns a single member by user id', async () => {
-      mockAssertPermissions.mockResolvedValue(undefined);
-      mockFindUnique.mockResolvedValue(member());
-
-      const result = await runInTenant(() =>
-        service.getMember('user-1', 'user-2'),
-      );
-
-      expect(result).toMatchObject({
-        membershipId: 'membership-1',
-        userId: 'user-2',
+  describe('role resolution', () => {
+    it('defaults to the tenant employee role when roleId omitted', async () => {
+      await runInTenant(async () => {
+        mockRoleFindFirst.mockResolvedValue(tenantScopedRole());
+        mockUserUpsert.mockResolvedValue({ id: 'new-user-1' });
+        mockMembershipFindUnique.mockResolvedValue(null);
+        mockMembershipCreate.mockResolvedValue(fullMembership());
+        await withTx(() =>
+          service.createMember('actor-1', dto({ roleId: undefined })),
+        );
       });
-      expect(mockFindUnique).toHaveBeenCalledWith({
+
+      expect(mockRoleFindFirst).toHaveBeenCalledWith({
         where: {
-          userId_tenantId: { userId: 'user-2', tenantId: 'tenant-1' },
+          tenantId: 'tenant-1',
+          key: SYSTEM_ROLE_KEYS.EMPLOYEE,
+          isSystem: true,
         },
-        include: expect.objectContaining({}) as object,
+        select: { id: true, key: true, isSystem: true },
       });
     });
 
-    it('returns 404 when the user is not a member of the tenant', async () => {
-      mockAssertPermissions.mockResolvedValue(undefined);
-      mockFindUnique.mockResolvedValue(null);
+    it('resolves an explicit roleId', async () => {
+      await runInTenant(async () => {
+        mockRoleFindUnique.mockResolvedValue(tenantScopedRole());
+        mockUserUpsert.mockResolvedValue({ id: 'new-user-1' });
+        mockMembershipFindUnique.mockResolvedValue(null);
+        mockMembershipCreate.mockResolvedValue(fullMembership());
+        await withTx(() =>
+          service.createMember('actor-1', dto({ roleId: 'role-9' })),
+        );
+      });
 
-      await expect(
-        runInTenant(() => service.getMember('user-1', 'user-unknown')),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockRoleFindUnique).toHaveBeenCalledWith({
+        where: { tenantId_id: { tenantId: 'tenant-1', id: 'role-9' } },
+        select: { id: true, key: true, isSystem: true },
+      });
+      expect(mockRoleFindFirst).not.toHaveBeenCalled();
     });
 
-    it('requires member:read', async () => {
-      mockAssertPermissions.mockRejectedValue(new ForbiddenException());
+    it('rejects a cross-tenant/missing role with 404 (explicit roleId)', async () => {
+      await runInTenant(async () => {
+        mockRoleFindUnique.mockResolvedValue(null);
+        await expect(
+          service.createMember('actor-1', dto({ roleId: 'cross-tenant-role' })),
+        ).rejects.toThrow(NotFoundException);
+      });
+    });
 
-      await expect(
-        runInTenant(() => service.getMember('user-1', 'user-2')),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+    it('rejects missing default employee role with 404', async () => {
+      await runInTenant(async () => {
+        mockRoleFindFirst.mockResolvedValue(null);
+        await expect(
+          service.createMember('actor-1', dto({ roleId: undefined })),
+        ).rejects.toThrow(new RegExp(DEFAULT_ROLE_NOT_FOUND));
+      });
     });
   });
 
-  describe('updateMemberStatus', () => {
-    it('suspends a non-owner member without the owner lock', async () => {
-      mockAssertPermissions.mockResolvedValue(undefined);
-      mockFindUnique.mockResolvedValue(member());
-      mockUpdate.mockResolvedValue(member({ status: 'SUSPENDED' }));
+  describe('owner assignment protection', () => {
+    beforeEach(() => {
+      mockUserUpsert.mockResolvedValue({ id: 'new-user-1' });
+      mockMembershipFindUnique.mockResolvedValue(null);
+      mockMembershipCreate.mockResolvedValue(fullMembership());
+    });
 
-      const result = await runInTenant(() =>
-        service.updateMemberStatus('user-1', 'membership-1', {
-          status: 'SUSPENDED',
-        }),
-      );
-
-      expect(result.status).toBe('SUSPENDED');
-      expect(mockUpdate).toHaveBeenCalledWith({
-        where: { id: 'membership-1' },
-        data: { status: 'SUSPENDED' },
-        include: expect.objectContaining({}) as object,
+    it('allows owner to assign owner', async () => {
+      permissionService.getPermissions.mockResolvedValue({
+        isOwner: true,
+        keys: [],
       });
-      expect(mockTransaction).not.toHaveBeenCalled();
-      expect(mockClearMemo).toHaveBeenCalled();
+      await runInTenant(async () => {
+        mockRoleFindUnique.mockResolvedValue({
+          id: 'owner-role',
+          key: SYSTEM_ROLE_KEYS.OWNER,
+          isSystem: true,
+        });
+        await withTx(() =>
+          service.createMember('owner-1', dto({ roleId: 'owner-role' })),
+        );
+      });
     });
 
-    it('reactivates a suspended non-owner member', async () => {
-      mockAssertPermissions.mockResolvedValue(undefined);
-      mockFindUnique.mockResolvedValue(member({ status: 'SUSPENDED' }));
-      mockUpdate.mockResolvedValue(member({ status: 'ACTIVE' }));
+    it.each([
+      ['admin', { isOwner: false, keys: [PERMISSIONS.MEMBER_MANAGE] }],
+      ['admin-without-manage', { isOwner: false, keys: [] }],
+    ])('denies non-owner %s from assigning owner', async (_label, snapshot) => {
+      permissionService.getPermissions.mockResolvedValue(snapshot);
+      await runInTenant(async () => {
+        mockRoleFindUnique.mockResolvedValue({
+          id: 'owner-role',
+          key: SYSTEM_ROLE_KEYS.OWNER,
+          isSystem: true,
+        });
+        await expect(
+          service.createMember('admin-1', dto({ roleId: 'owner-role' })),
+        ).rejects.toThrow(ForbiddenException);
+        expect(permissionService.getPermissions).toHaveBeenCalledWith(
+          'admin-1',
+        );
+      });
+    });
+  });
 
-      const result = await runInTenant(() =>
-        service.updateMemberStatus('user-1', 'membership-1', {
-          status: 'ACTIVE',
+  describe('user resolution', () => {
+    beforeEach(() => {
+      mockUserUpsert.mockResolvedValue({ id: 'new-user-1' });
+      mockMembershipFindUnique.mockResolvedValue(null);
+      mockMembershipCreate.mockResolvedValue(fullMembership());
+    });
+
+    it('normalizes email before resolving the user (trim + lowercase)', async () => {
+      await runInTenant(async () => {
+        mockRoleFindFirst.mockResolvedValue(tenantScopedRole());
+        await withTx(() =>
+          service.createMember(
+            'actor-1',
+            dto({ email: '  Invite@Example.COM  ' }),
+          ),
+        );
+      });
+
+      expect(mockUserUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { email: 'invite@example.com' } }),
+      );
+    });
+
+    it('reuses an existing User instead of duplicating', async () => {
+      await runInTenant(async () => {
+        mockRoleFindFirst.mockResolvedValue(tenantScopedRole());
+        mockUserUpsert.mockResolvedValue({ id: 'existing-user-1' });
+        await withTx(() => service.createMember('actor-1', dto()));
+      });
+
+      expect(mockUserUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          create: {
+            email: 'invite@example.com',
+            firstName: 'Invite',
+            lastName: 'User',
+          },
         }),
       );
-
-      expect(result.status).toBe('ACTIVE');
     });
+  });
 
-    it('requires member:manage', async () => {
-      mockAssertPermissions.mockRejectedValue(new ForbiddenException());
-
-      await expect(
-        runInTenant(() =>
-          service.updateMemberStatus('user-1', 'membership-1', {
-            status: 'SUSPENDED',
-          }),
-        ),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+  describe('self-onboarding protection', () => {
+    it('rejects onboarding the actor themselves with 403', async () => {
+      await runInTenant(async () => {
+        mockRoleFindFirst.mockResolvedValue(tenantScopedRole());
+        mockMembershipFindUnique.mockResolvedValue(null);
+        mockUserUpsert.mockResolvedValue({ id: 'actor-1' });
+        mockTransaction.mockImplementation(
+          async (cb: (tx: typeof txClient) => Promise<unknown>) => cb(txClient),
+        );
+        await expect(
+          withTx(() =>
+            service.createMember(
+              'actor-1',
+              dto({ email: 'actor-me@example.com' }),
+            ),
+          ),
+        ).rejects.toThrow(ForbiddenException);
+      });
     });
+  });
 
-    it('returns 404 when the membership does not exist', async () => {
-      mockAssertPermissions.mockResolvedValue(undefined);
-      mockFindUnique.mockResolvedValue(null);
-
-      await expect(
-        runInTenant(() =>
-          service.updateMemberStatus('user-1', 'membership-missing', {
-            status: 'SUSPENDED',
-          }),
-        ),
-      ).rejects.toBeInstanceOf(NotFoundException);
+  describe('duplicate membership', () => {
+    it('rejects an existing membership for the same user+tenant with 409', async () => {
+      await runInTenant(async () => {
+        mockRoleFindFirst.mockResolvedValue(tenantScopedRole());
+        mockUserUpsert.mockResolvedValue({ id: 'user-1' });
+        mockMembershipFindUnique.mockResolvedValue({
+          id: 'existing-membership',
+        });
+        await expect(
+          withTx(() => service.createMember('actor-1', dto())),
+        ).rejects.toThrow(ConflictException);
+      });
     });
+  });
 
-    it('rejects changing your own membership status with 403', async () => {
-      mockAssertPermissions.mockResolvedValue(undefined);
-      mockFindUnique.mockResolvedValue(member({ userId: 'user-1' }));
-
-      await expect(
-        runInTenant(() =>
-          service.updateMemberStatus('user-1', 'membership-1', {
-            status: 'SUSPENDED',
-          }),
-        ),
-      ).rejects.toBeInstanceOf(ForbiddenException);
-      expect(mockUpdate).not.toHaveBeenCalled();
-    });
-
-    it('suspends an owner through the last-active-owner lock when another owner remains', async () => {
-      mockAssertPermissions.mockResolvedValue(undefined);
-      mockFindUnique
-        .mockResolvedValueOnce(
-          member({
-            userId: 'user-2',
-            role: {
-              id: 'role-o',
-              key: 'owner',
-              name: 'Owner',
-              isSystem: true,
-            },
-          }),
-        )
-        .mockResolvedValueOnce(
-          member({
-            userId: 'user-2',
-            role: {
-              id: 'role-o',
-              key: 'owner',
-              name: 'Owner',
-              isSystem: true,
-            },
-            status: 'SUSPENDED',
+  describe('transactional integrity', () => {
+    it('rolls back the entire transaction when user upsert fails with P2002', async () => {
+      await runInTenant(async () => {
+        mockRoleFindFirst.mockResolvedValue(tenantScopedRole());
+        mockUserUpsert.mockRejectedValue(
+          new Prisma.PrismaClientKnownRequestError('dup', {
+            code: 'P2002',
+            clientVersion: 'test',
           }),
         );
-      mockTransaction.mockImplementation(async (cb) =>
-        cb({ membership: { update: mockUpdate }, $queryRaw: mockQueryRaw }),
-      );
-      mockQueryRaw.mockResolvedValue([{ id: 'o-1' }, { id: 'o-2' }]);
-      mockUpdate.mockResolvedValue({ id: 'membership-1' });
+        mockTransaction.mockImplementation(
+          async (cb: (tx: typeof txClient) => Promise<unknown>) => cb(txClient),
+        );
+        await expect(service.createMember('actor-1', dto())).rejects.toThrow(
+          ConflictException,
+        );
+        expect(mockMembershipCreate).not.toHaveBeenCalled();
+      });
+    });
+  });
 
-      const result = await runInTenant(() =>
-        service.updateMemberStatus('user-1', 'membership-1', {
-          status: 'SUSPENDED',
-        }),
-      );
-
-      expect(result.status).toBe('SUSPENDED');
-      expect(mockTransaction).toHaveBeenCalled();
-      expect(mockQueryRaw).toHaveBeenCalled();
-      expect(mockClearMemo).toHaveBeenCalled();
+  describe('tenant context', () => {
+    it('fails closed outside a tenant context', async () => {
+      await expect(service.createMember('actor-1', dto())).rejects.toThrow();
     });
 
-    it('rejects suspending the last active owner with 409', async () => {
-      mockAssertPermissions.mockResolvedValue(undefined);
-      mockFindUnique.mockResolvedValue(
-        member({
-          userId: 'user-2',
-          role: { id: 'role-o', key: 'owner', name: 'Owner', isSystem: true },
-        }),
-      );
-      mockTransaction.mockImplementation(async (cb) =>
-        cb({ membership: { update: mockUpdate }, $queryRaw: mockQueryRaw }),
-      );
-      mockQueryRaw.mockResolvedValue([{ id: 'o-1' }]);
+    it('never writes a client-supplied tenantId into the membership', async () => {
+      await runInTenant(async () => {
+        mockRoleFindUnique.mockResolvedValue(
+          tenantScopedRole({ id: 'role-1' }),
+        );
+        mockUserUpsert.mockResolvedValue({ id: 'new-user-1' });
+        mockMembershipFindUnique.mockResolvedValue(null);
+        mockMembershipCreate.mockResolvedValue(
+          fullMembership({ userId: 'new-user-1' }),
+        );
+        await withTx(() =>
+          service.createMember('actor-1', dto({ roleId: 'role-1' })),
+        );
+      });
 
-      await expect(
-        runInTenant(() =>
-          service.updateMemberStatus('user-1', 'membership-1', {
-            status: 'SUSPENDED',
-          }),
-        ),
-      ).rejects.toBeInstanceOf(ConflictException);
-      expect(mockUpdate).not.toHaveBeenCalled();
+      const createCalls = mockMembershipCreate.mock.calls as unknown as Array<
+        [
+          {
+            data: Record<string, unknown>;
+          },
+        ]
+      >;
+      const createCall = createCalls[0][0];
+      expect(createCall.data).toEqual({
+        userId: 'new-user-1',
+        tenantId: 'tenant-1',
+        roleId: 'role-1',
+      });
+      expect(createCall).toHaveProperty('include');
     });
   });
 });

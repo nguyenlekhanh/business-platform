@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  Post,
   Put,
   UseGuards,
   UseInterceptors,
@@ -12,9 +13,12 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { JwtUser } from '../auth/jwt.strategy';
 import { CurrentUser } from '../rbac/current-user.decorator';
+import { PERMISSIONS } from '../rbac/permission-catalog';
+import { RequirePermission } from '../rbac/permission.decorator';
 import { PermissionsGuard } from '../rbac/permissions.guard';
 import { TenantContextInterceptor } from '../tenant/tenant-context.interceptor';
 import { TenantResolutionGuard } from '../tenant/tenant-resolution.guard';
+import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberStatusDto } from './dto/member.dto';
 import { MemberService, MemberSummary } from './member.service';
 
@@ -37,6 +41,18 @@ import { MemberService, MemberSummary } from './member.service';
 )
 export class MemberController {
   constructor(private readonly memberService: MemberService) {}
+
+  @Post()
+  @RequirePermission(PERMISSIONS.MEMBER_MANAGE)
+  @ApiOperation({
+    summary: 'Onboard a new member into the tenant (POST /members)',
+  })
+  create(
+    @CurrentUser() user: JwtUser,
+    @Body() dto: CreateMemberDto,
+  ): Promise<MemberSummary> {
+    return this.memberService.createMember(user.userId, dto);
+  }
 
   @Get()
   @ApiOperation({ summary: 'List members of the tenant' })

@@ -1,4 +1,9 @@
 /* global process */
+// Decorator metadata polyfill: production code gets this from the Nest
+// bootstrap; standalone unit suites must load it explicitly so DTO classes
+// using class-transformer's @Type (e.g. PageQueryDto.limit) can decorate.
+import 'reflect-metadata';
+
 process.env.NODE_ENV = 'test';
 process.env.PORT = '3100';
 process.env.DATABASE_URL =

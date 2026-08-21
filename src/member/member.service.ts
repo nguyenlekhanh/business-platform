@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -6,14 +7,21 @@ import {
 import { MembershipStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../common/database/prisma/prisma.service';
 import { TenantContextService } from '../common/tenant-context/tenant-context.service';
+import { normalizeEmail } from '../common/utils/normalize-email.util';
 import { assertNotLastActiveOwner } from '../rbac/last-active-owner';
 import { PERMISSIONS, SYSTEM_ROLE_KEYS } from '../rbac/permission-catalog';
 import { PermissionService } from '../rbac/permission.service';
+import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberStatusDto } from './dto/member.dto';
 
 const MEMBERSHIP_NOT_FOUND = 'Membership not found';
 const SELF_STATUS_CHANGE = 'Cannot change your own membership status';
+const SELF_MEMBERSHIP = 'Cannot add yourself as a member';
 const LAST_ACTIVE_OWNER = 'Cannot suspend the last active owner of the tenant';
+const ALREADY_MEMBER = 'User is already a member of this tenant';
+const ROLE_NOT_FOUND = 'Role not found';
+const DEFAULT_ROLE_NOT_FOUND = 'Default role not found';
+const OWNER_ASSIGNMENT = 'Only the owner can assign the owner role';
 
 const MEMBER_INCLUDE = {
   user: {
@@ -130,6 +138,117 @@ export class MemberService {
 
     this.permissionService.clearMemo();
     return this.toSummary(updated);
+  }
+
+  /**
+   * Onboards a new member into the current tenant (POST /members).
+   *
+   * SECURITY INVARIANTS (mirrors RoleService protections):
+   * - member:manage asserted through PermissionService (owner semantics).
+   * - Tenant derived ONLY from TenantContext; client tenantId ignored.
+   * - Target User resolved globally by normalized email (trim+lowercase),
+   *   reusing the existing User row (no duplicates) via upsert.
+   * - Target Role resolved by tenant-scoped lookup (extension enforces
+   *   tenant scoping): cross-tenant roleId -> null -> 404.
+   * - Assigning owner requires the actor to be owner (OWNER_ASSIGNMENT).
+   * - Custom role assignment cannot bypass bounded-grant rules because the
+   *   role is resolved through the tenant-scoped store and its grants are
+   *   inherent to the role (no client-supplied permissionIds are accepted).
+   * - actor cannot onboard themselves (SELF_MEMBERSHIP) -> 403.
+   * - Duplicate [userId, tenantId] membership -> 409.
+   * - All writes run inside a single $transaction so a failure (e.g. P2002 on
+   *   User.email or Membership uniqueness) aborts atomically.
+   */
+  async createMember(
+    actorUserId: string,
+    dto: CreateMemberDto,
+  ): Promise<MemberSummary> {
+    await this.assertManage(actorUserId);
+
+    const tenantId = this.tenantContext.requireTenantId();
+    const role = await this.resolveTargetRole(dto.roleId);
+    if (!role) {
+      throw new NotFoundException(
+        dto.roleId ? ROLE_NOT_FOUND : DEFAULT_ROLE_NOT_FOUND,
+      );
+    }
+
+    if (role.key === SYSTEM_ROLE_KEYS.OWNER) {
+      const actor = await this.permissionService.getPermissions(actorUserId);
+      if (!actor.isOwner) {
+        throw new ForbiddenException(OWNER_ASSIGNMENT);
+      }
+    }
+
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const user = await tx.user.upsert({
+          where: { email: normalizeEmail(dto.email) },
+          update: {},
+          create: {
+            email: normalizeEmail(dto.email),
+            firstName: dto.firstName ?? null,
+            lastName: dto.lastName ?? null,
+          },
+          select: { id: true },
+        });
+
+        if (user.id === actorUserId) {
+          throw new ForbiddenException(SELF_MEMBERSHIP);
+        }
+
+        const existing = await tx.membership.findUnique({
+          where: {
+            userId_tenantId: {
+              userId: user.id,
+              tenantId,
+            },
+          },
+          select: { id: true },
+        });
+        if (existing) {
+          throw new ConflictException(ALREADY_MEMBER);
+        }
+
+        const created = await tx.membership.create({
+          data: {
+            userId: user.id,
+            tenantId,
+            roleId: role.id,
+          },
+          include: MEMBER_INCLUDE,
+        });
+        return this.toSummary(created);
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        // Database unique constraint is the final authority for a concurrent
+        // duplicate User.email or Membership uniqueness violation — never
+        // expose the internal Prisma error.
+        throw new ConflictException(ALREADY_MEMBER);
+      }
+      throw error;
+    }
+  }
+
+  private async resolveTargetRole(
+    roleId?: string,
+  ): Promise<{ id: string; key: string; isSystem: boolean } | null> {
+    const tenantId = this.tenantContext.requireTenantId();
+    if (roleId) {
+      const role = await this.prisma.role.findUnique({
+        where: { tenantId_id: { tenantId, id: roleId } },
+        select: { id: true, key: true, isSystem: true },
+      });
+      return role;
+    }
+    return this.prisma.role.findFirst({
+      where: { tenantId, key: SYSTEM_ROLE_KEYS.EMPLOYEE, isSystem: true },
+      select: { id: true, key: true, isSystem: true },
+    });
   }
 
   /** Tenant-scoped membership lookup by userId (composite unique key). */

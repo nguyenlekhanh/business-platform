@@ -8,8 +8,13 @@ import { LoggingModule } from './common/logging/logging.module';
 import { RedisModule } from './common/redis/redis.module';
 import { TenantContextModule } from './common/tenant-context/tenant-context.module';
 import { HealthModule } from './health/health.module';
+import { AssetModule } from './asset/asset.module';
+import { CustomerModule } from './customer/customer.module';
+import { EquipmentModule } from './equipment/equipment.module';
 import { MemberModule } from './member/member.module';
 import { RbacModule } from './rbac/rbac.module';
+import { ReservationModule } from './reservation/reservation.module';
+import { StoreModule } from './store/store.module';
 import { TenantAdminModule } from './tenant-admin/tenant-admin.module';
 import { TenantModule } from './tenant/tenant.module';
 import { validateEnv } from './common/config/env.validation';
@@ -31,6 +36,11 @@ import { validateEnv } from './common/config/env.validation';
     RbacModule,
     MemberModule,
     TenantAdminModule,
+    StoreModule,
+    AssetModule,
+    EquipmentModule,
+    CustomerModule,
+    ReservationModule,
   ],
   providers: [
     {

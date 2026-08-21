@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
+import { createHash } from 'crypto';
 import type { Server } from 'node:http';
 import request from 'supertest';
 import { AppModule } from '../app.module';
@@ -13,6 +14,7 @@ describe('Auth (integration)', () => {
 
   interface AuthResponseBody {
     accessToken?: string;
+    refreshToken?: string;
     email?: string;
     firstName?: string;
     lastName?: string;
@@ -63,6 +65,20 @@ describe('Auth (integration)', () => {
     return (response.body as AuthResponseBody).accessToken as string;
   };
 
+  const loginAsPair = async (
+    userEmail: string,
+    pass: string = password,
+  ): Promise<{ accessToken: string; refreshToken: string }> => {
+    const response = await request(httpServer())
+      .post('/auth/login')
+      .send({ email: userEmail, password: pass });
+    const body = response.body as AuthResponseBody;
+    return {
+      accessToken: body.accessToken as string,
+      refreshToken: body.refreshToken as string,
+    };
+  };
+
   const suspendUser = async (userEmail: string) => {
     const user = await prisma.user.findUnique({ where: { email: userEmail } });
     if (!user) {
@@ -105,7 +121,7 @@ describe('Auth (integration)', () => {
     emailsToCleanUp.push(expectedEmail);
   });
 
-  it('logs in and returns an access token', async () => {
+  it('logs in and returns an access + refresh token pair', async () => {
     const response = await request(httpServer())
       .post('/auth/login')
       .send({ email, password });
@@ -114,6 +130,8 @@ describe('Auth (integration)', () => {
     expect(response.status).toBe(200);
     expect(typeof body.accessToken).toBe('string');
     expect((body.accessToken as string).length).toBeGreaterThan(0);
+    expect(typeof body.refreshToken).toBe('string');
+    expect((body.refreshToken as string).length).toBeGreaterThan(40);
   });
 
   it('returns the current user for a valid token', async () => {
@@ -224,5 +242,183 @@ describe('Auth (integration)', () => {
       .set('Authorization', 'Bearer not-a-valid-jwt');
 
     expect(response.status).toBe(401);
+  });
+
+  it('refreshes: rotates the token pair and invalidates the presented refresh token', async () => {
+    const userEmail = `refresh-${Date.now()}@example.com`;
+    await registerUser(userEmail);
+    const first = await loginAsPair(userEmail);
+
+    const refreshed = await request(httpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: first.refreshToken });
+
+    const body = refreshed.body as AuthResponseBody;
+    expect(refreshed.status).toBe(200);
+    expect(typeof body.accessToken).toBe('string');
+    expect(typeof body.refreshToken).toBe('string');
+    // Refresh material is random -> always differs from the presented token.
+    // (Access-token strings may legitimately coincide when issued within the
+    // same second, so they are compared via /me below instead.)
+    expect(body.refreshToken).not.toBe(first.refreshToken);
+
+    // The rotated pair is bound to the same user (claims read directly so
+    // the assertion does not depend on JwtService typing quirks).
+    const claims = JSON.parse(
+      Buffer.from((body.accessToken ?? '').split('.')[1], 'base64').toString(
+        'utf8',
+      ),
+    ) as { sub: string };
+    const user = await prisma.user.findUnique({ where: { email: userEmail } });
+    expect(claims.sub).toBe(user!.id);
+
+    // The old refresh token can never be used again (reuse rejected with
+    // the same generic error as every other failure class).
+    const reuse = await request(httpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: first.refreshToken });
+    expect(reuse.status).toBe(401);
+    expect((reuse.body as AuthResponseBody).message).toBe(
+      'Invalid credentials',
+    );
+
+    // The new pair still authenticates.
+    const me = await request(httpServer())
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${body.accessToken}`);
+    expect(me.status).toBe(200);
+  });
+
+  it('rejects an unknown/random refresh token with the generic error', async () => {
+    await registerUser(`random-refresh-${Date.now()}@example.com`);
+
+    const response = await request(httpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: 'a'.repeat(64) });
+
+    expect(response.status).toBe(401);
+    expect((response.body as AuthResponseBody).message).toBe(
+      'Invalid credentials',
+    );
+  });
+
+  it('rejects a malformed refresh request body with 400', async () => {
+    const empty = await request(httpServer()).post('/auth/refresh').send({});
+    expect(empty.status).toBe(400);
+
+    const wrongType = await request(httpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: 12345 });
+    expect(wrongType.status).toBe(400);
+  });
+
+  it('never persists raw refresh-token material (hash-only storage)', async () => {
+    const userEmail = `plaintext-${Date.now()}@example.com`;
+    await registerUser(userEmail);
+    const { refreshToken } = await loginAsPair(userEmail);
+
+    const user = await prisma.user.findUnique({ where: { email: userEmail } });
+    const rows = await prisma.refreshToken.findMany({
+      where: { userId: user!.id },
+      select: { tokenHash: true },
+    });
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.tokenHash).not.toBe(refreshToken);
+      expect(row.tokenHash).not.toContain(refreshToken.slice(0, 8));
+      expect(row.tokenHash).toHaveLength(64); // sha256 hex digest
+    }
+    expect(
+      rows.some(
+        (row) =>
+          row.tokenHash ===
+          createHash('sha256').update(refreshToken).digest('hex'),
+      ),
+    ).toBe(true);
+  });
+
+  it('logout revokes the session and is idempotent without leaking existence info', async () => {
+    const userEmail = `logout-${Date.now()}@example.com`;
+    await registerUser(userEmail);
+    const first = await loginAsPair(userEmail);
+
+    const logout = await request(httpServer())
+      .post('/auth/logout')
+      .send({ refreshToken: first.refreshToken });
+    expect(logout.status).toBe(204);
+    expect(logout.text).toBe('');
+
+    // Revoked token cannot be refreshed afterwards.
+    const afterLogout = await request(httpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: first.refreshToken });
+    expect(afterLogout.status).toBe(401);
+    expect((afterLogout.body as AuthResponseBody).message).toBe(
+      'Invalid credentials',
+    );
+
+    // Repeated logout of the same token stays silently successful.
+    const repeat = await request(httpServer())
+      .post('/auth/logout')
+      .send({ refreshToken: first.refreshToken });
+    expect(repeat.status).toBe(204);
+
+    // Unknown tokens get the identical silent success (no oracle).
+    const unknown = await request(httpServer())
+      .post('/auth/logout')
+      .send({ refreshToken: 'never-issued-token' });
+    expect(unknown.status).toBe(204);
+  });
+
+  it('logout does not affect unrelated sessions of other users', async () => {
+    const emailA = `logout-a-${Date.now()}@example.com`;
+    const emailB = `logout-b-${Date.now()}@example.com`;
+    await registerUser(emailA);
+    await registerUser(emailB);
+    const sessionA = await loginAsPair(emailA);
+    const sessionB = await loginAsPair(emailB);
+
+    const logoutA = await request(httpServer())
+      .post('/auth/logout')
+      .send({ refreshToken: sessionA.refreshToken });
+    expect(logoutA.status).toBe(204);
+
+    const refreshB = await request(httpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: sessionB.refreshToken });
+    expect(refreshB.status).toBe(200);
+
+    const meB = await request(httpServer())
+      .get('/auth/me')
+      .set(
+        'Authorization',
+        `Bearer ${(refreshB.body as AuthResponseBody).accessToken}`,
+      );
+    expect(meB.status).toBe(200);
+    const bodyB = meB.body as AuthResponseBody;
+    expect(bodyB.email).toBe(emailB);
+  });
+
+  it('keeps stateless access-token auth unchanged across a refresh rotation', async () => {
+    const userEmail = `stateless-${Date.now()}@example.com`;
+    await registerUser(userEmail);
+    const first = await loginAsPair(userEmail);
+
+    const before = await request(httpServer())
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${first.accessToken}`);
+    expect(before.status).toBe(200);
+
+    const refreshed = await request(httpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: first.refreshToken });
+    expect(refreshed.status).toBe(200);
+
+    // The pre-rotation access token remains valid until its own expiry:
+    // revocation applies to refresh tokens only.
+    const after = await request(httpServer())
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${first.accessToken}`);
+    expect(after.status).toBe(200);
   });
 });
