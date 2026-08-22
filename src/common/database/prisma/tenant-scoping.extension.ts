@@ -15,6 +15,8 @@ const TENANT_SCOPED_MODELS = new Set<Prisma.ModelName>([
   'Equipment',
   'Customer',
   'Reservation',
+  // Phase 3 (commerce): catalog/cart/order/payment domains are tenant-owned.
+  'Category',
 ]);
 
 interface MutableOperationArgs {

@@ -34,13 +34,298 @@ RULES:
 
 ## Current Phase
 
-- Phase: 2 — Auth + Multi-tenant (roadmap-corrected)
-- Status: COMPLETE — refresh token flow, logout, and the final verification
-  gate are done; every Phase 2 exit criterion is verified (see assessment
-  below and the "Phase 2 — COMPLETE" section).
+- Phase: 3 — Core Commerce (authoritative roadmap: 0→1→2→3→4 POS→5
+  Booking→6 Logistics→7 AI/ML→8 Production; NO 2K/2L sub-phases)
+- Status: ASSESSMENT COMPLETE (read-only) — awaiting explicit user approval
+  of the architecture below BEFORE Unit U1 implementation starts. No
+  production/schema/migration code has been touched for Phase 3.
 - Last updated: 2026-08-21
-- Current active task: none. HARD STOP reached — awaiting user approval to
-  begin Phase 3 — Core Commerce.
+- Phase 2 verified COMPLETE from repository state on 2026-08-21 (fresh run):
+  unit 431/431 (30 suites), integration 379/379 (13 suites);
+  POST /auth/refresh + POST /auth/logout present
+  (src/auth/auth.controller.ts:51,62); RefreshToken model in schema.prisma;
+  7 migrations applied incl. 20260821040000_add_refresh_token.
+- Docs read for this kickoff: docs/phase-progress.md (complete), README.md.
+  AGENTS.md / ARCHITECTURE.md / DOMAIN_RULES.md / API_RULES.md /
+  DATABASE_RULES.md DO NOT EXIST (glob *.md found only the two above).
+- Code inspected: prisma/schema.prisma (all models), tenant-scoping.extension
+  (contracts + TENANT_SCOPED_MODELS), rbac/permission-catalog.ts, app.module,
+  store service/controller (canonical domain conventions), customer service
+  (for the Commerce-Customer decision), pagination module contract (from 2J
+  records), package.json scripts.
+
+---
+
+# Phase 3 — Core Commerce: Architecture Assessment (READ-ONLY)
+
+## 0. Ground rules honored
+Rental residue FROZEN: src/reservation/, src/equipment/, rental aspects of
+src/customer/ + src/asset/, migration 20260821020000 constraints — no
+expansion/refactor/rename/deletion. Additive migrations only, migrate deploy,
+never db push/reset, never touch existing migrations. Tenant isolation via the
+centralized extension stays fail-closed; RBAC and auth untouched.
+
+## 1. Domain boundaries
+Six NEW NestJS modules, one aggregate root each, plus additive links:
+- catalog: Category + Product + ProductVariant + Price (one module
+  `src/catalog/`? NO — keep separate small modules per roadmap units:
+  `src/category/`, `src/product/` (Product+Variant+Price share one bounded
+  context: variants/prices are product internals exposed via product-centric
+  APIs), `src/inventory/`, `src/cart/`, `src/order/` (Order+OrderItem),
+  `src/payment/`. Cross-module access only via services, never raw prisma on
+  another module's models except inside order-service transactions where
+  atomicity demands it (documented per-call).
+- Customer participates ONLY as an optional reference on Order (see §3).
+
+## 2. Prisma models & relationships (all tenant-scoped)
+```
+Category   {id cuid, tenantId, name, description?, timestamps}
+             @@unique([tenantId, name])
+Product    {id cuid, tenantId, categoryId?, name, code, description?,
+            status ProductStatus(DRAFT|ACTIVE|ARCHIVED) default DRAFT}
+             @@unique([tenantId, code]); category FK Restrict (same-tenant,
+             resolved app-side like storeId on Asset)
+ProductVariant {id cuid, tenantId, productId, sku, name?, status
+            VariantStatus(ACTIVE|ARCHIVED) default ACTIVE}
+             @@unique([tenantId, sku]); product FK Cascade
+Price      {id cuid, tenantId, variantId, currency Char(3), amountMinor BigInt}
+             @@unique([variantId, currency])  // one current price per pair;
+             variant FK Cascade                // updates overwrite, NO history
+Inventory  {id cuid, tenantId, variantId @unique, quantityOnHand Int}
+             variant FK Cascade; row created lazily by first adjustment
+Cart       {id cuid, tenantId, userId, status CartStatus(OPEN|CONVERTED)}
+             owner = authenticated member User; @@index([tenantId,userId,status])
+CartItem   {id cuid, cartId, variantId, quantity Int>0}
+             @@unique([cartId,variantId]) (add merges); both FK Cascade;
+             variant FK Restrict? -> Cascade (cart dies with tenant anyway)
+Order      {id cuid, tenantId, userId(creator), customerId?, status
+            OrderStatus(PENDING|PAID|CANCELLED) default PENDING,
+            currency Char(3), subtotalMinor BigInt, cancelledAt?}
+OrderItem  {id cuid, orderId, variantId, productName+variantName+sku SNAPSHOTS,
+            quantity>0, currency Char(3), unitAmountMinor BigInt,
+            lineTotalMinor BigInt}   // immutable after creation
+             order FK Cascade; variant FK RESTRICT (history survives);
+             customer FK Restrict when set
+Payment    {id cuid, tenantId, orderId, status PaymentStatus(PROCESSING|
+            CAPTURED|FAILED), method String(free-form e.g. CASH/CARD),
+            amountMinor BigInt, currency Char(3)}  // immutable once terminal
+             order FK Cascade (dies with tenant only)
+```
+All ten models get `tenantId` + standard `@@index([tenantId, createdAt, id])`
+(keyset pagination parity) unless noted.
+
+## 3. Customer-in-Commerce decision (EXPLICIT, pre-approved required)
+Options analyzed:
+- A) REUSE the existing `Customer` table as the shared tenant customer
+  registry. Its columns are generic (name/code/email/phone/status); nothing
+  is rental-specific except comments and the Reservation link. Commerce adds
+  ONLY additive outbound references: nullable `Order.customerId` (+index).
+  Rental behavior untouched; Reservation/customer.service logic unchanged
+  EXCEPT one ADDITIVE branch in customer.service delete: a second P2003
+  mapping ('Customer has orders and cannot be deleted') so integrity errors
+  surface as 409 instead of raw 500. This single touch to frozen-adjacent
+  code is FLAGGED for explicit approval.
+- B) New parallel `CommerceCustomer` model — zero contact with frozen code,
+  but splits the registry permanently; every later phase reconciles two
+  sources of truth. Rejected.
+RECOMMENDATION: Option A. The customer link on orders is OPTIONAL (nullable)
+so the entire commerce flow works with zero customers.
+
+## 4. Money & currency (decided BEFORE any price/order/payment code)
+- Representation: INTEGER MINOR UNITS (`amountMinor`, BigInt → BIGINT).
+  No floats anywhere. All arithmetic is exact BigInt integer math; line total
+  = quantity × unitAmountMinor (exact). No rounding rules exist in Phase 3
+  because there are NO percentage discounts/taxes yet — division never occurs.
+- Currency: ISO-4217 uppercase alpha-3, stored `Char(3)`, DTO-validated
+  `^[A-Z]{3}$`. One order = ONE currency (all items validated uniform).
+- API serialization: BigInt amounts serialize as STRINGS in JSON projections
+  (documented convention; avoids JS number precision loss).
+- Snapshots: Price is the LIVE current price. OrderItem snapshots
+  unitAmountMinor+currency at creation; Payment snapshots amount at capture
+  initiation. Later product/price edits NEVER rewrite history.
+
+## 5. Inventory semantics & concurrency (decided up front)
+- Semantics: single pool per variant, no multi-location (POS multi-store stock
+  belongs to Phase 4). `quantityOnHand` = physically held AND implicitly
+  reserved-by-open-orders (see mutation rule). Available-to-sell = onHand −
+  sum(open-order quantities) is NOT stored; instead stock is DECREMENTED AT
+  ORDER CREATION and RESTOCKED ON CANCELLATION ("decrement-on-order").
+  WHY: one source of truth, no reservation ledger, oversell impossible.
+- Mutations ONLY via InventoryService.adjust(): guarded conditional write
+  `updateMany({where:{variantId, tenantId, quantityOnHand:{gte:-delta}},
+  data:{quantityOnHand:{increment:delta}}})` — count 0 → 409
+  ('Insufficient stock'). Row created lazily (missing row == 0 on hand).
+- Concurrency strategy: atomic conditional UPDATEs (no read-modify-write),
+  executed INSIDE interactive transactions where part of larger flows. Two
+  concurrent orders racing the last unit: exactly one updateMany succeeds.
+- Negative stock impossible; DB CHECK (quantityOnHand >= 0) added in
+  handwritten SQL as defense in depth.
+
+## 6. Cart semantics
+- Cart belongs to the authenticated principal (member userId), tenant-scoped.
+  One OPEN cart per (tenant,user) enforced service-side find-or-create
+  (small create race tolerated — extra OPEN cart is inert; documented
+  limitation). Items merge by @@unique([cartId,variantId]).
+- Prices shown live from current Price rows at read time; carts hold NO money
+  fields and reserve NO stock. Currency mix allowed in cart display but
+  rejected at checkout if items span currencies.
+- Conversion happens inside the order transaction: cart → CONVERTED.
+
+## 7. State machines (no client-controlled status anywhere; DTOs exclude
+status fields; whitelist rejects them)
+Order:  PENDING --capture--> PAID (server-side only, via payment capture tx)
+        PENDING --cancel--> CANCELLED (POST /orders/:id/cancel; restocks)
+        PAID terminal in Phase 3 (refunds/fulfilment => later phases);
+        cancel of PAID => 409 'Paid orders cannot be cancelled'
+Payment: PROCESSING --capture--> CAPTURED (tx also flips order to PAID)
+         PROCESSING --fail----> FAILED (terminal; order stays PENDING)
+         CAPTURED/FAILED immutable; re-capture idempotent-success.
+
+## 8. Transaction boundaries (interactive $transaction; tx inherits tenant
+scoping per extension contract; all writes top-level creates/updates, NEVER
+nested relation writes)
+T1 POST /orders: validate variants ACTIVE + fetch prices (uniform currency)
+   + compute totals -> guarded stock decrement(s) -> create Order ->
+   top-level-create each OrderItem -> mark cart CONVERTED (if checkout).
+   ANY failure rolls back everything (stock included).
+T2 POST /payments/:id/capture: payment PROCESSING->CAPTURED (guarded) +
+   order PENDING->PAID (guarded); count==0 anywhere -> abort.
+T3 POST /orders/:id/cancel: order PENDING->CANCELLED (guarded) + restock
+   increments per distinct variant.
+T4 inventory adjust: single guarded updateMany (create-if-missing first time).
+T5 POST /payments {orderId}: insert PROCESSING row only if order PENDING and
+   no CAPTURED payment exists (count check).
+
+## 9. Deletion semantics
+Category/Product/Variant DELETE = hard delete; RESTRICT/Cascade rules make
+referenced rows block deletion (P2002/P2003 mapped to clear 409s); ARCHIVED
+statuses provide soft-retirement instead. Order/Payment: NO delete endpoints
+(financial history). Cart: owner may discard own OPEN cart (DELETE /cart).
+Customer delete blocked while orders exist (additive P2003 branch, §3).
+
+## 10. RBAC permissions (catalog additions; existing keys untouched)
+Categories: category:read|create|update|delete|manage (new 'categories')
+Products:  product:* five-key pattern (new 'products' category)
+Inventory: inventory:read | inventory:manage (deliberate deviation: inventory
+           has no entity lifecycle, adjustment-only — documented)
+Cart:      cart:manage (owner-scoped self-service)
+Orders:    order:read|create|delete|manage — DELETE key = cancel, mirroring
+           the established reservation DELETE=cancel precedent; no UPDATE
+           key (orders have no editable fields post-creation)
+Payments:  payment:read|create|manage (capture/fail = manage)
+Role defaults (consistent with existing): admin += every new *_MANAGE;
+employee += *_READ + CART_MANAGE + ORDER_CREATE + PAYMENT_CREATE.
+Owner keeps semantic all-permissions (no grants needed).
+
+## 11. API boundaries (PATCH on ALL new domains per user direction —
+existing domains stay PUT; divergence is deliberate and documented)
+/categories GET(list paginated)|POST ; /categories/:id GET|PATCH|DELETE
+/products  GET(list; filters status,categoryId)|POST ;
+/products/:id GET|PATCH|DELETE
+/products/:id/variants GET|POST ; /variants/:id PATCH|DELETE
+/variants/:id/price PUT {currency, amountMinor} (upsert per (variant,currency))
+/inventory/:variantId GET ; /inventory/adjust POST {variantId, delta≠0,
+reason?}
+/cart GET(own open cart w/ live totals) ; /cart/items POST|PATCH(/:itemId)|
+DELETE(/:itemId) ; DELETE /cart (discard)
+/orders POST {items:[{variantId,quantity}], customerId?} OR empty body =>
+checkout own OPEN cart ; /orders/:id GET ; /orders GET(paginated, filter
+status) ; /orders/:id/cancel POST
+/payments POST {orderId, method} ; /payments/:id GET ;
+/payments/:id/capture POST ; /payments/:id/fail POST
+Guard chain/validation/pagination conventions identical to StoreController.
+
+## 12. Indexes/constraints beyond defaults
+@@unique([tenantId,name|code|sku]) per catalog entity; Price
+@@unique([variantId,currency]); Inventory variantId @unique; CartItem
+@@unique([cartId,variantId]); Order @@index([customerId]); OrderItem
+@@index([orderId])+@@index([variantId]); Payment @@index([orderId]).
+Handwritten-SQL CHECKs (deploy-only discipline): amountMinor>=0,
+quantityOnHand>=0, order/item quantity>0, lineTotal = qty*unit (CHECK via
+generated column? NO — plain CHECK comparing stored columns).
+
+## 13. Migration strategy
+ONE additive handwritten-SQL migration per unit that changes schema
+(timestamp slots continuing from 20260821050000 upward), applied via
+`npx prisma migrate deploy`; `prisma validate` before each; generate after;
+NEVER modify existing migrations; deploy-only discipline preserved
+(reservation EXCLUDE constraint must survive).
+
+## 14. Test strategy (per unit + cross-domain)
+Unit: dto specs + service specs (mocked PrismaService) mirroring store/*.spec.
+Integration: AppModule+supertest suites with tenantA/B fixtures, covering:
+RBAC matrix (owner semantic-all, admin manage, employee scoped, manager-style
+denials), IDOR cross-tenant 404s, DTO whitelist/forbidNonWhitelisted 400s,
+cross-tenant reference protection (foreign categoryId/productId/variantId/
+customerId -> 404), money invariants (string serialization, exact totals,
+currency-mix rejection), state-machine matrices (order/payment), concurrency
+(parallel last-unit orders -> exactly one 201, mirrors reservation pattern),
+transaction rollback (forced failure leaves stock untouched), cart ownership
+(user B cannot read/mutate user A's cart within same tenant).
+
+## 15. Exact incremental plan (mandatory CHANGE→VERIFY→DOC→CONTINUE loop;
+each unit ends with its results recorded in a dedicated section here)
+U1 Category — schema+migration, module/service/controller/dto, RBAC keys,
+   dto+service+integration tests, gate. [FIRST IMPLEMENTATION UNIT]
+U2 Product — schema+migration (FK to Category), CRUD+PATCH+archive, filters,
+   tests, gate.
+U3 ProductVariant + Price — schema+migration, nested create/list under
+   product, flat /variants/:id manage, price upsert, tests, gate.
+U4 Inventory foundation — schema+migration, adjust/read endpoints, guarded
+   mutations, concurrency tests, gate.
+U5 Cart — schema+migration, own-cart semantics + item merge, live totals,
+   ownership isolation tests, gate.
+U6 Order + OrderItem — schema+migration, T1/T3 transactions, direct-items OR
+   cart-checkout, snapshots, state machine, concurrency/rollback tests, gate.
+U7 Payment — schema+migration, T2/T5, full-amount invariant, idempotent
+   terminal states, tests, gate.
+U8 Cross-domain verification — customer-delete-with-orders 409 (the flagged
+   additive branch), end-to-end flow test (category→product→variant→price→
+   stock→cart→order→pay→cancel-restock paths), full gate.
+U9 Final Phase 3 verification — complete gate, progress-doc closure,
+   HARD STOP for Phase 4 approval.
+
+## 16. Decisions flagged for explicit user approval (blocking U6/U7/U8, not U1)
+D1 §3 Customer Option A including the ONE additive P2003 branch in
+   customer.service.ts delete path (frozen-adjacent file).
+D2 PATCH verb on new domains vs PUT on existing ones.
+D3 "Decrement-on-order" inventory semantics (§5) incl. no-reservation-ledger.
+D4 Capture/fail endpoints are permission-guarded staff actions simulating
+   gateway confirmation (no real gateway in Phase 3).
+
+## 17. Recommended first implementation unit
+**U1 Category** — smallest standalone slice: one model, one migration, CRUD+
+pagination+RBAC+isolation, zero dependencies on other Commerce domains,
+exercises every convention the later units will reuse.
+
+HARD STOP: awaiting explicit approval of this assessment (or amendments)
+before any Phase 3 code is written.
+
+### PHASE 3 ASSESSMENT — APPROVED (2026-08-21, user)
+D1–D4 approved EXACTLY as assessed, plus all architecture decisions:
+money=BigInt minor units; currency ISO-4217 Char(3); BigInt JSON as
+strings; snapshots on OrderItem/Payment; Order PENDING->PAID|CANCELLED
+(PAID terminal); status never client-writable; T1-T5 transaction
+boundaries as specified in §8. D1: reuse generic Customer, nullable
+Order.customerId at U6, NO CommerceCustomer, rental code stays FROZEN,
+Customer delete protection additive+narrow only. D2: PATCH on new
+Commerce APIs only. D3: single pool per variant, decrement-on-order,
+restock-on-cancel, atomic guarded updateMany, never read-modify-write,
+oversell prevented by transaction/concurrency strategy. D4: simulated
+gateway only, server-controlled PROCESSING->CAPTURED|FAILED, terminal
+states immutable, RBAC-protected actions, no external providers.
+
+ACTIVE UNIT: U1 Category.
+Checkpoint requirements per unit (mandatory): CHANGE -> VERIFY ->
+UPDATE this doc -> CONTINUE. After each unit record: what changed, files
+changed, tests added, exact verification results, known issues/limits,
+next step. U1 verification must include: unit suites (dto+service),
+integration suite (CRUD/IDOR/RBAC matrix/manage-only-cannot-GET/employee
+read-only/owner semantic-all/invalid body/tenantId injection/pagination
+envelope+invalid cursor), format/build, full existing-suite preservation.
+No commit/push. U2 Product NOT started until explicit user approval.
+
+---
 
 ## Phase 2 Completion Assessment (2026-08-21, read-only)
 
@@ -1223,3 +1508,80 @@ NEXT ACTION:
   pattern; btree_gist prerequisite note; deploy-only migration discipline.
 - Next phase recommendation: await user approval; natural candidates are
   reservation lifecycle transitions or pagination/filtering for list endpoints.
+
+---
+
+## U1 CATEGORY — COMPLETE (2026-08-21)
+
+STATUS: U1 Category = COMPLETE (implemented, verified, documented).
+Phase 3 assessment + D1-D4: APPROVED (see above). Next step: U2 Product —
+NOT started; awaiting explicit user approval.
+
+MIGRATION (exactly one, additive, applied via prisma migrate deploy):
+- 20260821050000_add_category
+  CREATE TABLE "Category" (id TEXT PK cuid, "tenantId" TEXT NOT NULL,
+  name TEXT NOT NULL, description TEXT NULL, "createdAt"/"updatedAt"
+  TIMESTAMP(3)); unique ("tenantId","name"); indexes ("tenantId") and
+  ("tenantId","createdAt","id") for keyset parity; FK -> Tenant CASCADE.
+  No existing objects modified. prisma migrate status: up to date.
+
+FILES CHANGED (10):
+- prisma/schema.prisma (Category model + Tenant.categories backref)
+- prisma/migrations/20260821050000_add_category/migration.sql (new)
+- src/common/database/prisma/tenant-scoping.extension.ts ('Category' in
+  TENANT_SCOPED_MODELS)
+- src/rbac/permission-catalog.ts (CATEGORY_READ/CREATE/UPDATE/DELETE/
+  MANAGE keys; 'categories' permission category; admin += category:manage,
+  employee += category:read; owner semantic-all untouched)
+- src/category/dto/category.dto.ts (new: Create/Update/ListQuery DTOs,
+  whitelist + forbidNonWhitelisted contract, no client tenantId/id)
+- src/category/category.service.ts (new: fail-closed requireTenantId,
+  extension-scoped CRUD, P2002->409 'A category with this name already
+  exists in the tenant', NotFound='Category not found', CategorySummary
+  projection, shared keyset pagination envelope { data, meta.nextCursor })
+- src/category/category.controller.ts (new: /categories GET|POST,
+  /categories/:id GET|PATCH|DELETE; PATCH per D2; guard chain JWT ->
+  TenantResolutionGuard -> PermissionsGuard; TenantContextInterceptor;
+  GET requires category:read; writes RequireAnyPermission(create|manage /
+  update|manage / delete|manage); DELETE -> 204)
+- src/category/category.module.ts (new), src/app.module.ts (registration)
+- Tests (new): src/category/category.dto.spec.ts (16),
+  src/category/category.service.spec.ts (17),
+  src/category/category.integration.spec.ts (18)
+
+VERIFICATION RESULTS (exact):
+- Unit suite (jest.unit.json): 32 suites passed, 464 tests passed
+  (was 431 pre-U1; +33 from dto+service specs).
+- Integration suite (jest.integration.json): 14 suites passed,
+  397 tests passed (was 379 pre-U1; +18 category matrix incl. CRUD,
+  tenant isolation, IDOR, RBAC matrix, manage-only-cannot-GET, employee
+  read-only, owner semantic-all, invalid bodies, tenantId injection,
+  pagination envelope + cursor chaining asc/desc, invalid cursor 400).
+- npm run format: applied; all files formatted (category files clean).
+- npm run lint: 2 problems total (2 errors, 0 warnings) — BOTH
+  pre-existing and out of scope: src/asset/service.spec.ts:203 and :221
+  (no-unsafe-assignment). Zero new lint issues introduced by U1.
+- npm run build (nest build): success, no errors.
+- npx prisma validate: valid. npx prisma migrate status: database schema
+  is up to date.
+
+CONVENTIONS PRESERVED: fail-closed tenant scoping (extension +
+requireTenantId defense-in-depth), server-derived tenant only, no raw
+SQL on tenant-owned data, no generic RolePermission writes, existing
+rental domains untouched (reservation/equipment/customer/asset code
+FROZEN as required).
+
+KNOWN LIMITATIONS:
+- Categories are a flat taxonomy (no nesting/slugs/images) per approved
+  minimal scope.
+- DELETE is a hard delete (no Product links exist yet to protect);
+  referential protection will be revisited with U2 Product FKs if needed.
+- Integration fixture note: supertest responses are typed via local
+  interfaces + casts (repo pattern) to satisfy the strict lint profile.
+
+NEXT STEP: U2 Product (model + variants + prices skeleton) — PROPOSED,
+awaiting explicit approval before any code. Proposed U2 plan follows the
+same checkpoint workflow and reuses every convention validated here
+(tenant-scoped model registration, RBAC keys product:read/create/update/
+delete/manage with identical role defaults, keyset pagination, PATCH
+semantics, BigInt money fields serialized as strings per D-decisions).

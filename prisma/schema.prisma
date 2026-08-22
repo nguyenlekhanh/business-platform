@@ -200,6 +200,27 @@ model Reservation {
   @@index([tenantId, startAt, id])
 }
 
+// ---------- commerce: categories (Phase 3 U1) ----------
+// Tenant-scoped product taxonomy. Flat list, unique name within the tenant.
+// Deliberately minimal: no nesting, no slugs, no images — nothing beyond what
+// the approved Phase 3 scope requires.
+model Category {
+  id          String  @id @default(cuid())
+  tenantId    String
+  name        String // unique within the tenant
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  // Keyset pagination parity with all other tenant-scoped lists.
+  @@index([tenantId, createdAt, id])
+}
+
 // ---------- identity ----------
 model User {
   id           String       @id @default(cuid())
@@ -249,6 +270,7 @@ model Tenant {
   equipments  Equipment[]
   customers   Customer[]
   reservations Reservation[]
+  categories  Category[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

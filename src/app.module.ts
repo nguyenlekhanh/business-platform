@@ -9,6 +9,7 @@ import { RedisModule } from './common/redis/redis.module';
 import { TenantContextModule } from './common/tenant-context/tenant-context.module';
 import { HealthModule } from './health/health.module';
 import { AssetModule } from './asset/asset.module';
+import { CategoryModule } from './category/category.module';
 import { CustomerModule } from './customer/customer.module';
 import { EquipmentModule } from './equipment/equipment.module';
 import { MemberModule } from './member/member.module';
@@ -41,6 +42,7 @@ import { validateEnv } from './common/config/env.validation';
     EquipmentModule,
     CustomerModule,
     ReservationModule,
+    CategoryModule,
   ],
   providers: [
     {
