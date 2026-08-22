@@ -39,7 +39,7 @@ RULES:
 - Status: ASSESSMENT COMPLETE (read-only) — awaiting explicit user approval
   of the architecture below BEFORE Unit U1 implementation starts. No
   production/schema/migration code has been touched for Phase 3.
-- Last updated: 2026-08-22 (U3 ProductVariant+Price in progress -> COMPLETE this session)
+- Last updated: 2026-08-22 (U4 Inventory COMPLETE this session)
 - Phase 2 verified COMPLETE from repository state on 2026-08-21 (fresh run):
   unit 431/431 (30 suites), integration 379/379 (13 suites);
   POST /auth/refresh + POST /auth/logout present
@@ -318,8 +318,8 @@ states immutable, RBAC-protected actions, no external providers.
 ACTIVE UNIT: U1 Category -> COMPLETE. ACTIVE UNIT: U2 Product ->
 COMPLETE (user-approved 2026-08-21; see U2 checkpoint below). ACTIVE UNIT:
 U3 ProductVariant + Price -> COMPLETE (resumed 2026-08-22, see U3 checkpoint
-below). NEXT UNIT: U4 Inventory — NOT started; awaiting explicit user
-approval.
+below). ACTIVE UNIT: U4 Inventory -> COMPLETE (see U4 checkpoint below).
+NEXT UNIT: U5 Cart — NOT started; awaiting explicit user approval.
 Scope per assessment section 15: schema+migration, nested create/list under
 product, flat /variants/:id manage, price upsert, tests, gate. No Inventory/
 Cart/Order/Payment work in that unit.
@@ -1886,4 +1886,104 @@ model, RBAC product/inventory keys, keyset pagination, P2002->409,
 app-side parent resolution, guarded conditional writes, BigInt string
 convention).
 
-HARD STOP — U3 complete; do not start U4.
+HARD STOP — U3 complete; do not start U4 (superseded by U4 below).
+
+---
+
+## U4 INVENTORY — COMPLETE (2026-08-22)
+
+STATUS: U4 Inventory = COMPLETE (implemented, verified, documented). Scope
+delivered EXACTLY per approved §5/§8/§11: single stock pool per variant,
+atomic guarded adjustment (no read-modify-write), lazy row (missing ==0),
+DB CHECK >=0, tenant-isolated via variant lookup, RBAC inventory:read/manage,
+endpoints GET /inventory/:variantId and POST /inventory/adjust. NO
+Cart/Order/Payment/POS/Booking/rental work. HARD STOP: U5 NOT started;
+awaiting explicit user approval.
+
+MIGRATION (exactly one, additive, applied via manual execute + resolve):
+- 20260821080000_add_inventory
+  CREATE TABLE "Inventory" (id TEXT PK cuid, "tenantId" TEXT NOT NULL,
+  "variantId" TEXT NOT NULL UNIQUE, quantityOnHand INTEGER NOT NULL DEFAULT 0,
+  "createdAt"/"updatedAt" TIMESTAMP(3), CHECK ("quantityOnHand" >=0));
+  indexes ("tenantId"), ("tenantId","createdAt","id"); FK ->Tenant CASCADE,
+  ->ProductVariant CASCADE. Initial deploy via `prisma migrate deploy` hit
+  BOM/encoding error (0xFEFF) — fixed by rewriting migration.sql without BOM
+  (UTF8 no-BOM) and manual `prisma db execute --stdin` + `migrate resolve
+  --rolled-back` / `--applied` dance; final `migrate status` up to date
+  (11 migrations). `prisma validate` valid; `prisma generate` ok.
+
+FILES CHANGED (9):
+- prisma/schema.prisma (Inventory model + ProductVariant.inventory backref
+  + Tenant.inventories)
+- prisma/migrations/20260821080000_add_inventory/migration.sql (new)
+- src/rbac/permission-catalog.ts (INVENTORY_READ/MANAGE, new category
+  'inventory', admin += inventory:manage, employee += inventory:read)
+- src/common/database/prisma/tenant-scoping.extension.ts ('Inventory' in
+  TENANT_SCOPED_MODELS)
+- src/inventory/dto/inventory.dto.ts (new: AdjustInventoryDto variantId
+  @IsString @IsNotEmpty, delta @IsInt @NotEquals(0), reason @IsOptional
+  @MaxLength(500); whitelist rejects tenantId)
+- src/inventory/inventory.service.ts (new: getInventory returns 0 synthetic
+  when no row; adjust uses atomic updateMany { quantityOnHand:{gte:-delta}}
+  increment delta, lazy create for missing +delta, P2002 race fallback to
+  retry, Conflict 'Insufficient stock' on count 0 with existing or negative
+  on missing; variant lookup 404 per tenant; fail-closed)
+- src/inventory/inventory.controller.ts (new: GET /inventory/:variantId
+  @RequirePermission(inventory:read), POST /inventory/adjust
+  @RequirePermission(inventory:manage); ValidationPipe whitelist/transform/
+  forbidNonWhitelisted; controller prefix 'inventory' — POST adjust not
+  shadowed by GET :variantId because methods differ)
+- src/inventory/inventory.module.ts (new), src/app.module.ts (imports
+  InventoryModule)
+- Tests (new): src/inventory/dto/inventory.dto.spec.ts (6 groups,
+  delta zero/fractional/string, reason length, tenantId injection),
+  src/inventory/inventory.service.spec.ts (11: fail-closed, get zero vs
+  stored, create on first positive, decrement missing ->409, guarded
+  update success, insufficient on existing, P2002 fallback, 404 variant),
+  src/inventory/inventory.integration.spec.ts (17: 401/403 gates, initial
+  stock 0 -> +10 -> -3, insufficient 409 preserves quantity, missing row
+  decrement 409, exact depletion to 0, tenant IDOR 404, unknown variant
+  404, manage-only write-no-read, employee read-only, owner semantic-all,
+  validation 400 matrix inc. delta 0/fractional/string, tenantId/reason
+  length, concurrent decrements last-units exactly one 201 one 409 final 2,
+  concurrent increments sum 7, cascade variant delete -> inventory 404)
+
+VERIFICATION RESULTS (exact, full gate re-run after prettier/lint fixes):
+- Unit suite (jest.unit.json): 38 suites passed, 556 tests passed
+  (was 539 post-U3; +17 inventory dto/service)
+- Integration suite (jest.integration.json): 17 suites passed, 453 tests
+  passed (was 436 post-U3; +17 inventory integration exactly;
+  pre-existing 16 suites unchanged)
+- npm run format: prettier --write on src/inventory/** then --check passes
+  (fixed 76 prettier errors across 4 files in first run)
+- npm run lint: 2 problems total (2 errors, 0 warnings) — BOTH pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment); 1 new
+  error (unused AdjustInventoryDto import) fixed, then clean
+- npm run build (nest build): success
+- npx prisma validate: valid; npx prisma migrate status: up to date
+  (11 migrations); prisma generate: v6.19.3
+
+CONVENTIONS PRESERVED: fail-closed tenant scoping via variant existence check
++ extension, atomic guarded updateMany never read-modify-write, DB CHECK
+defense in depth, inventory:read/manage RBAC deviation documented (§10),
+no raw SQL on tenant data (except migration), no nested writes, no
+generic RolePermission, rental FROZEN, product/variant cascade preserved.
+
+KNOWN LIMITATIONS:
+- No list endpoint or pagination for inventory (per §11 — single-row per
+  variant, not a collection).
+- No reservation ledger: available-to-sell == quantityOnHand (decrement-on-order
+  semantics deferred to U6 Order, which will reuse adjust()).
+- Concurrent increments/decrements rely on DB atomic updateMany; test proves
+  last-unit race exactly one succeeds. No explicit row locking or advisory
+  lock needed at this isolation level.
+- Inventory row is not auto-created at variant creation (lazy); GET returns
+  synthetic 0. First positive adjust creates row; first negative correctly 409.
+- Variant status (ARCHIVED) does not block adjustments yet (business rule
+  deferred to Order validation in U6).
+
+NEXT STEP: U5 Cart — PROPOSED ONLY, awaiting explicit user approval before any
+code. Will reuse inventory adjust API for stock reservation (decrement on
+order, not cart). Will NOT implement Order/Payment yet.
+
+HARD STOP — U4 complete; do not start U5.

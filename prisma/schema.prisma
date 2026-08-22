@@ -283,7 +283,8 @@ model ProductVariant {
   tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  prices Price[]
+  prices    Price[]
+  inventory Inventory?
 
   @@unique([tenantId, sku])
   @@index([tenantId])
@@ -310,6 +311,26 @@ model Price {
   @@unique([variantId, currency])
   @@index([tenantId])
   // Keyset pagination parity with all other tenant-scoped lists.
+  @@index([tenantId, createdAt, id])
+}
+
+// ---------- commerce: inventory (Phase 3 U4) ----------
+// Single stock pool per variant, no multi-location. Row is created lazily
+// on first adjustment (missing row == 0 on hand). Mutations are atomic
+// guarded conditional writes; DB CHECK prevents negative stock.
+model Inventory {
+  id             String @id @default(cuid())
+  tenantId       String
+  variantId      String @unique
+  quantityOnHand Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
   @@index([tenantId, createdAt, id])
 }
 
@@ -366,6 +387,7 @@ model Tenant {
   products    Product[]
   productVariants ProductVariant[]
   prices      Price[]
+  inventories Inventory[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
