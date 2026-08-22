@@ -23,6 +23,8 @@ import {
 
 const CATEGORY_NOT_FOUND = 'Category not found';
 const NAME_TAKEN = 'A category with this name already exists in the tenant';
+const IN_USE =
+  'Category is referenced by existing products and cannot be deleted';
 
 /** Safe category projection: all scalar fields, no relation traversal. */
 export interface CategorySummary {
@@ -170,7 +172,21 @@ export class CategoryService {
     if (!category) {
       throw new NotFoundException(CATEGORY_NOT_FOUND);
     }
-    await this.prisma.category.delete({ where: { id: categoryId } });
+    try {
+      await this.prisma.category.delete({ where: { id: categoryId } });
+    } catch (error) {
+      // The Product.categoryId foreign key is RESTRICT (Phase 3 U2): a
+      // category still referenced by products cannot be deleted. Map the FK
+      // violation to a clear 409 instead of an opaque 500 (approved
+      // "P2002/P2003 mapped to clear 409s" convention).
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2003'
+      ) {
+        throw new ConflictException(IN_USE);
+      }
+      throw error;
+    }
     return { id: categoryId };
   }
 

@@ -239,5 +239,20 @@ describe('CategoryService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(mockDelete).not.toHaveBeenCalled();
     });
+
+    it('maps a FK-restrict violation (products still linked) to 409', async () => {
+      mockFindUnique.mockResolvedValue(category());
+      mockDelete.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError(
+          'Foreign key constraint violated on the constraint: Product_categoryId_fkey',
+          { code: 'P2003', clientVersion: 'test' },
+        ),
+      );
+
+      await expect(
+        runInTenant(() => service.deleteCategory('cat-1')),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(mockDelete).toHaveBeenCalledWith({ where: { id: 'cat-1' } });
+    });
   });
 });

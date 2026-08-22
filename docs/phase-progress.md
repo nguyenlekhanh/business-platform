@@ -315,15 +315,15 @@ oversell prevented by transaction/concurrency strategy. D4: simulated
 gateway only, server-controlled PROCESSING->CAPTURED|FAILED, terminal
 states immutable, RBAC-protected actions, no external providers.
 
-ACTIVE UNIT: U1 Category.
-Checkpoint requirements per unit (mandatory): CHANGE -> VERIFY ->
-UPDATE this doc -> CONTINUE. After each unit record: what changed, files
-changed, tests added, exact verification results, known issues/limits,
-next step. U1 verification must include: unit suites (dto+service),
-integration suite (CRUD/IDOR/RBAC matrix/manage-only-cannot-GET/employee
-read-only/owner semantic-all/invalid body/tenantId injection/pagination
-envelope+invalid cursor), format/build, full existing-suite preservation.
-No commit/push. U2 Product NOT started until explicit user approval.
+ACTIVE UNIT: U1 Category -> COMPLETE. ACTIVE UNIT: U2 Product ->
+COMPLETE (user-approved 2026-08-21; see U2 checkpoint below). NEXT UNIT:
+U3 ProductVariant + Price — NOT started; awaiting explicit user approval.
+Scope per assessment section 15: schema+migration, nested create/list under
+product, flat /variants/:id manage, price upsert, tests, gate. No Inventory/
+Cart/Order/Payment work in that unit.
+Checkpoints per unit (mandatory): CHANGE -> VERIFY -> UPDATE this doc ->
+CONTINUE. After each unit record: what changed, files changed, tests added,
+exact verification results, known issues/limits, next step. No commit/push.
 
 ---
 
@@ -1585,3 +1585,133 @@ same checkpoint workflow and reuses every convention validated here
 (tenant-scoped model registration, RBAC keys product:read/create/update/
 delete/manage with identical role defaults, keyset pagination, PATCH
 semantics, BigInt money fields serialized as strings per D-decisions).
+
+---
+
+## U2 PRODUCT — COMPLETE (2026-08-21)
+
+STATUS: U2 Product = COMPLETE (implemented, verified, documented).
+Scope delivered EXACTLY per approved assessment §15 U2 line: schema +
+one additive migration (FK to Category), tenant scoping, product:* RBAC
+keys, CRUD API on existing Commerce conventions, keyset pagination,
+DTO validation/security, unit + integration tests. NO Variant/Price/
+Inventory/Cart/Order/Payment/POS/Booking work was done. HARD STOP
+reached: U3 NOT started; awaiting explicit user approval.
+
+MIGRATION (exactly one, additive, applied via prisma migrate deploy):
+- 20260821060000_add_product
+  CREATE TABLE "Product" (id TEXT PK cuid, "tenantId" TEXT NOT NULL,
+  "categoryId" TEXT NULL, name TEXT NOT NULL, code TEXT NOT NULL,
+  description TEXT NULL, status "ProductStatus" NOT NULL DEFAULT 'DRAFT',
+  "createdAt"/"updatedAt" TIMESTAMP(3)); CREATE TYPE "ProductStatus"
+  AS ENUM ('DRAFT','ACTIVE','ARCHIVED'); unique ("tenantId","code");
+  indexes ("tenantId") and ("tenantId","createdAt","id") for keyset
+  parity; FK -> Tenant CASCADE; FK -> Category RESTRICT via composite
+  ("tenantId","categoryId") same-tenant constraint (Category FK is a
+  UNIQUE id so Prisma maps the relation through the composite pair).
+  No existing objects modified. prisma migrate status: up to date.
+
+FILES CHANGED (11 changed/new):
+- prisma/schema.prisma (Product model + ProductStatus enum +
+  Tenant.products and Category.products backrefs)
+- prisma/migrations/20260821060000_add_product/migration.sql (new)
+- src/common/database/prisma/tenant-scoping.extension.ts ('Product' in
+  TENANT_SCOPED_MODELS)
+- src/rbac/permission-catalog.ts (PRODUCT_READ/CREATE/UPDATE/DELETE/
+  MANAGE keys; new 'products' permission category; admin +=
+  product:manage, employee += product:read; owner semantic-all untouched;
+  existing keys untouched)
+- src/product/dto/product.dto.ts (new: CreateProductDto name+code
+  required, optional categoryId/description/status enum;
+  UpdateProductDto all-optional incl. archive via status; no client
+  tenantId/id anywhere)
+- src/product/product.service.ts (new: fail-closed requireTenantId;
+  extension-scoped CRUD; P2002 -> 409 'A product with this code already
+  exists in the tenant'; NotFound='Product not found'; optional
+  categoryId resolved app-side via tenant-scoped Category lookup ->
+  foreign/unknown category = 404 BEFORE any write (Asset storeId
+  pattern); list filters status/categoryId composed with keyset via
+  predicates AND-array exactly like AssetService; ProductSummary
+  projection; shared { data, meta.nextCursor } envelope)
+- src/product/product.controller.ts (new: /products GET|POST,
+  /products/:id GET|PATCH|DELETE; PATCH verb per approved D2; guard
+  chain JWT -> TenantResolutionGuard -> PermissionsGuard;
+  TenantContextInterceptor; DELETE -> 204)
+- src/product/product.module.ts (new), src/app.module.ts (registration)
+- src/category/category.service.ts (ONE additive branch: deleteCategory
+  now catches Prisma P2003 from the Product RESTRICT FK and maps it to
+  409 'Category is referenced by existing products and cannot be
+  deleted' — implements assessment §9 'P2002/P2003 mapped to clear
+  409s'; all other CategoryService behavior untouched)
+- Tests (new): src/product/product.dto.spec.ts (16),
+  src/product/product.service.spec.ts (21);
+  src/category/category.service.spec.ts (+1 FK-restrict->409 unit test)
+
+TESTS ADDED (integration, new file): src/product/product.integration.spec.ts
+(19 tests) covering: unauthenticated 401; membership-less outsider 403 on
+all routes; permissionless member 403; admin lifecycle create(default
+DRAFT)->list envelope shape->{data,meta.nextCursor}->get->patch(name+
+status ACTIVE)->archive(ARCHIVED)->delete 204->404 after; duplicate code
+same tenant 409 with exact message; same code across two tenants OK
+(composite uniqueness); categoryId resolution same-tenant OK / cross-
+tenant 404 'Category not found' / unknown 404; category-delete-blocked-
+by-product 409 then still patchable; canonical 'Product not found'
+message; status+categoryId filter matrix incl. combined filter and
+foreign-categoryId-matches-nothing; IDOR (B's product invisible to A on
+GET/PATCH/DELETE/list) + X-Tenant-ID scoping; manage-only role writes
+but 403 on GET; employee strictly read-only; owner semantic-all without
+grants; invalid create payloads x7 -> 400; tenantId injection on create
+400; tenantId/id injection on patch 400; unknown query field 400;
+malformed cursor 400; pagination chain asc limit=2 across 5 rows +
+terminal nextCursor null + desc first page.
+
+BUG FOUND+FIXED during verification:
+- listProducts dropped equality filters on page 1 (no cursor): `where`
+  was built as `{ AND: [keyset] }` only when a cursor existed, so
+  ?status=ACTIVE without a cursor returned EVERYTHING. Caught by the
+  unit spec before integration. Fixed to the AssetService predicate
+  composition (equality pushed into AND array alongside keyset).
+
+VERIFICATION RESULTS (exact, full gate re-run after fix):
+- Unit suite (jest.unit.json): 34 suites passed, 503 tests passed
+  (was 464 post-U1; +39 from product dto/service specs and the category
+  P2003 unit test).
+- Integration suite (jest.integration.json): 15 suites passed,
+  418 tests passed (was 397 post-U1; +21 = the new product integration
+  suite exactly; every pre-existing suite unchanged and green).
+- npm run format (prettier --write on touched files): clean afterwards;
+  npx prettier --check passes.
+- npm run lint: 2 problems total (2 errors) — BOTH the documented
+  PRE-EXISTING errors src/asset/asset.service.spec.ts:203/:221
+  (no-unsafe-assignment). Zero new lint issues from U2.
+- npm run build (nest build): success.
+- npx prisma validate: valid. npx prisma migrate status: Database
+  schema is up to date! (9 migrations.)
+
+CONVENTIONS PRESERVED: fail-closed tenant scoping (extension +
+requireTenantId defense-in-depth), server-derived tenant only, no raw
+SQL on tenant-owned data, no generic RolePermission writes, rental
+domains untouched except the single flagged-and-approved-style additive
+P2003 branch in CategoryService.deleteCategory (mirrors the established
+reservation/customer P2003 precedent; required by §9 semantics since
+products now reference categories).
+
+KNOWN LIMITATIONS:
+- No text search on product name/code (out of approved scope, parity
+  with other domains).
+- categoryId filter matches nothing for foreign ids (no existence
+  oracle) — intended.
+- Deleting a PRODUCT is a hard delete; once variants exist (U3) their
+  Cascade FK will remove them with it — revisit if business wants
+  blocking there.
+- CategoryService.deleteCategory P2003 mapping returns 409 for ANY
+  restrict violation on Category; today the only restricting child is
+  Product, message is product-specific by design.
+- BigInt/money fields do not exist yet on products (prices arrive U3);
+  string serialization convention not exercised by this unit.
+
+NEXT STEP: U3 ProductVariant + Price — PROPOSED ONLY, awaiting explicit
+user approval before any code. Will reuse every convention validated in
+U1/U2 (tenant-scoped model registration, RBAC five-key pattern + role
+defaults, keyset pagination, PATCH semantics, P2002->409, app-side
+parent resolution, whitelist DTOs).

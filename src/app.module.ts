@@ -11,6 +11,7 @@ import { HealthModule } from './health/health.module';
 import { AssetModule } from './asset/asset.module';
 import { CategoryModule } from './category/category.module';
 import { CustomerModule } from './customer/customer.module';
+import { ProductModule } from './product/product.module';
 import { EquipmentModule } from './equipment/equipment.module';
 import { MemberModule } from './member/member.module';
 import { RbacModule } from './rbac/rbac.module';
@@ -43,6 +44,7 @@ import { validateEnv } from './common/config/env.validation';
     CustomerModule,
     ReservationModule,
     CategoryModule,
+    ProductModule,
   ],
   providers: [
     {
