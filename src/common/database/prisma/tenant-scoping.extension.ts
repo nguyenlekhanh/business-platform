@@ -21,6 +21,8 @@ const TENANT_SCOPED_MODELS = new Set<Prisma.ModelName>([
   'ProductVariant',
   'Price',
   'Inventory',
+  'Cart',
+  'CartItem',
 ]);
 
 interface MutableOperationArgs {

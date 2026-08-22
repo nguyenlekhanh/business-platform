@@ -39,7 +39,7 @@ RULES:
 - Status: ASSESSMENT COMPLETE (read-only) — awaiting explicit user approval
   of the architecture below BEFORE Unit U1 implementation starts. No
   production/schema/migration code has been touched for Phase 3.
-- Last updated: 2026-08-22 (U4 Inventory COMPLETE this session)
+- Last updated: 2026-08-22 (U5 Cart COMPLETE this session)
 - Phase 2 verified COMPLETE from repository state on 2026-08-21 (fresh run):
   unit 431/431 (30 suites), integration 379/379 (13 suites);
   POST /auth/refresh + POST /auth/logout present
@@ -319,7 +319,8 @@ ACTIVE UNIT: U1 Category -> COMPLETE. ACTIVE UNIT: U2 Product ->
 COMPLETE (user-approved 2026-08-21; see U2 checkpoint below). ACTIVE UNIT:
 U3 ProductVariant + Price -> COMPLETE (resumed 2026-08-22, see U3 checkpoint
 below). ACTIVE UNIT: U4 Inventory -> COMPLETE (see U4 checkpoint below).
-NEXT UNIT: U5 Cart — NOT started; awaiting explicit user approval.
+ACTIVE UNIT: U5 Cart -> COMPLETE (see U5 checkpoint below).
+NEXT UNIT: U6 Order — NOT started; awaiting explicit user approval.
 Scope per assessment section 15: schema+migration, nested create/list under
 product, flat /variants/:id manage, price upsert, tests, gate. No Inventory/
 Cart/Order/Payment work in that unit.
@@ -1986,4 +1987,108 @@ NEXT STEP: U5 Cart — PROPOSED ONLY, awaiting explicit user approval before any
 code. Will reuse inventory adjust API for stock reservation (decrement on
 order, not cart). Will NOT implement Order/Payment yet.
 
-HARD STOP — U4 complete; do not start U5.
+HARD STOP — U4 complete; do not start U5 (superseded by U5 below).
+
+---
+
+## U5 CART — COMPLETE (2026-08-22)
+
+STATUS: U5 Cart = COMPLETE (implemented, verified, documented). Scope
+delivered EXACTLY per §6/§11: own open cart per (tenant,user) find-or-create,
+items merge by @@unique([cartId,variantId]), live totals from current Price
+rows (BigInt strings per currency, mixed currencies allowed in cart), no
+stock reservation, discard own OPEN cart. NO Order/Payment/POS/Booking/rental
+work. HARD STOP: U6 NOT started; awaiting explicit user approval.
+
+MIGRATION (exactly one, additive, prisma migrate deploy):
+- 20260821090000_add_cart
+  CREATE TYPE "CartStatus" AS ENUM ('OPEN','CONVERTED');
+  CREATE TABLE "Cart" (id TEXT PK cuid, "tenantId" TEXT NOT NULL,
+  "userId" TEXT NOT NULL, status "CartStatus" NOT NULL DEFAULT 'OPEN',
+  "createdAt"/"updatedAt" TIMESTAMP(3));
+  CREATE TABLE "CartItem" (id TEXT PK cuid, "tenantId" TEXT NOT NULL,
+  "cartId" TEXT NOT NULL, "variantId" TEXT NOT NULL, quantity INTEGER NOT
+  NULL, "createdAt"/"updatedAt" TIMESTAMP(3), CHECK (quantity>0));
+  UNIQUE "CartItem_cartId_variantId_key" ON ("cartId","variantId");
+  indexes ("tenantId"), ("tenantId","userId","status") on Cart,
+  ("tenantId"), ("cartId"), ("variantId") on CartItem plus standard
+  ("tenantId","createdAt","id") on both; FKs ->Tenant CASCADE, ->User
+  CASCADE, ->Cart CASCADE, ->ProductVariant CASCADE. No existing objects
+  modified. `migrate status` 12/12 up to date; `validate` valid.
+
+FILES CHANGED (8):
+- prisma/schema.prisma (Cart/CartItem models + CartStatus enum +
+  ProductVariant.cartItems + Tenant.carts/cartItems + User.carts)
+- prisma/migrations/20260821090000_add_cart/migration.sql (new)
+- src/rbac/permission-catalog.ts (CART_MANAGE, category 'cart',
+  ADMIN += cart:manage, EMPLOYEE += cart:manage per §10 employee defaults)
+- src/common/database/prisma/tenant-scoping.extension.ts ('Cart','CartItem'
+  in TENANT_SCOPED_MODELS)
+- src/cart/dto/cart.dto.ts (new: AddCartItemDto variantId + quantity @IsInt
+  @Min(1) @Max(1e6), UpdateCartItemDto quantity same; whitelist rejects
+  tenantId)
+- src/cart/cart.service.ts (new: getCart find-or-create OPEN per tenant+user
+  with race-tolerant P2002 fallback; addItem validates variant 404, merges
+  via findFirst + increment or create with P2002 retry, updateItem/removeItem
+  verify ownership (item.cartId == own OPEN cart.id else 404), discardCart
+  deletes OPEN cart 404 if none; enrichCart batch loads variants + prices,
+  computes lineTotals quantity*amountMinor and totals per currency as strings,
+  all tenant-scoped; fail-closed)
+- src/cart/cart.controller.ts (new: GET /cart (cart:manage), POST
+  /cart/items, PATCH /cart/items/:itemId, DELETE /cart/items/:itemId,
+  DELETE /cart 204; JwtAuthGuard+TenantResolutionGuard+PermissionsGuard+
+  TenantContextInterceptor, CurrentUser userId server-derived, ValidationPipe
+  whitelist/transform/forbidNonWhitelisted)
+- src/cart/cart.module.ts (new), src/app.module.ts (imports CartModule)
+- Tests (new): src/cart/dto/cart.dto.spec.ts (add valid, missing/empty
+  variantId, zero/fractional/string quantity, unknown fields),
+  src/cart/cart.service.spec.ts (15+6: fail-closed, get empty vs enriched
+  with price/totals, find-or-create race, add new vs merge vs P2002 race vs
+  404 variant, update owned vs 404, remove, discard 404),
+  src/cart/cart.integration.spec.ts (15: 401/403 gates, empty cart on first
+  GET same cart id, merge same variant quantity sum, mixed currencies totals
+  live price update reflects, patch quantity, delete item, discard creates new
+  cart, unknown variant/item 404, cross-tenant variant 404, tenant isolation
+  carts per X-Tenant-ID, ownership isolation same tenant different users cannot
+  mutate, owner semantic-all, validation 400 matrix inc. tenantId injection,
+  discard without cart 404)
+
+VERIFICATION RESULTS (exact, full gate re-run after prettier/lint fixes):
+- Unit suite (jest.unit.json): 40 suites passed, 577 tests passed
+  (was 556 post-U4; +21 cart dto/service)
+- Integration suite (jest.integration.json): 18 suites passed, 468 tests passed
+  (was 453 post-U4; +15 cart integration exactly; pre-existing 17 suites
+  unchanged)
+- npm run format: prettier --write on src/cart/** ok, check passes
+- npm run lint: 2 problems total (2 errors, 0 warnings) — BOTH pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment); 3 cart
+  files had unused-import errors fixed, then clean
+- npm run build (nest build): success
+- npx prisma validate: valid; npx prisma migrate status: up to date (12 migrations)
+- npx prisma generate: v6.19.3
+
+CONVENTIONS PRESERVED: fail-closed tenant scoping via variant lookup + extension
+for Cart/CartItem, owner-scoped self-service via server-derived userId
+(CurrentUser), atomic merge with P2002 retry, live Price BigInt string
+totals per currency, tenant isolation per X-Tenant-ID, ownership isolation
+within same tenant (item.cartId ownership check), cart:manage RBAC deviation
+documented (§10), no stock reservation, no raw SQL, rental FROZEN, product/
+variant cascade preserved (CartItem -> ProductVariant CASCADE).
+
+KNOWN LIMITATIONS:
+- One OPEN cart per (tenant,user) find-or-create tolerates race creating extra
+  inert OPEN cart (documented, same as assessment).
+- Cart has no pagination (single cart per user, items ordered by createdAt).
+- Totals are live from Price rows; if variant has no price, its contribution is
+  0 (lineTotals empty, totals exclude it). Multi-price variants sum per currency.
+- Currency mix allowed in cart; checkout uniform-currency check deferred to U6 Order.
+- Status is server-controlled (OPEN->CONVERTED only via future Order checkout);
+  no client-writable status.
+- No quantity availability check against inventory at cart time (stock check
+  deferred to Order creation guarded updateMany).
+
+NEXT STEP: U6 Order + OrderItem — PROPOSED ONLY, awaiting explicit user approval
+before any code. Will handle cart checkout vs direct items, snapshots, T1/T3
+transactions, concurrency/rollback. Will NOT implement Payment yet.
+
+HARD STOP — U5 complete; do not start U6.

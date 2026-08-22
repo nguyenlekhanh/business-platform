@@ -285,6 +285,7 @@ model ProductVariant {
 
   prices    Price[]
   inventory Inventory?
+  cartItems CartItem[]
 
   @@unique([tenantId, sku])
   @@index([tenantId])
@@ -334,6 +335,53 @@ model Inventory {
   @@index([tenantId, createdAt, id])
 }
 
+// ---------- commerce: cart (Phase 3 U5) ----------
+// Owner = authenticated member User, tenant-scoped. One OPEN cart per
+// (tenant,user) enforced find-or-create. Items merge by @@unique([cartId,variantId]).
+// Prices are live from Price rows at read time; cart holds NO money fields.
+enum CartStatus {
+  OPEN
+  CONVERTED
+}
+
+model Cart {
+  id       String     @id @default(cuid())
+  tenantId String
+  userId   String
+  status   CartStatus @default(OPEN)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items  CartItem[]
+
+  @@index([tenantId])
+  @@index([tenantId, userId, status])
+  @@index([tenantId, createdAt, id])
+}
+
+model CartItem {
+  id        String @id @default(cuid())
+  tenantId  String
+  cartId    String
+  variantId String
+  quantity  Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  cart    Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([cartId, variantId])
+  @@index([tenantId])
+  @@index([cartId])
+  @@index([variantId])
+}
+
 // ---------- identity ----------
 model User {
   id           String       @id @default(cuid())
@@ -344,6 +392,7 @@ model User {
   status       UserStatus   @default(ACTIVE)
   memberships  Membership[]
   refreshTokens RefreshToken[]
+  carts        Cart[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -388,6 +437,8 @@ model Tenant {
   productVariants ProductVariant[]
   prices      Price[]
   inventories Inventory[]
+  carts       Cart[]
+  cartItems   CartItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
