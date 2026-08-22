@@ -39,7 +39,7 @@ RULES:
 - Status: ASSESSMENT COMPLETE (read-only) — awaiting explicit user approval
   of the architecture below BEFORE Unit U1 implementation starts. No
   production/schema/migration code has been touched for Phase 3.
-- Last updated: 2026-08-21
+- Last updated: 2026-08-22 (U3 ProductVariant+Price in progress -> COMPLETE this session)
 - Phase 2 verified COMPLETE from repository state on 2026-08-21 (fresh run):
   unit 431/431 (30 suites), integration 379/379 (13 suites);
   POST /auth/refresh + POST /auth/logout present
@@ -316,8 +316,10 @@ gateway only, server-controlled PROCESSING->CAPTURED|FAILED, terminal
 states immutable, RBAC-protected actions, no external providers.
 
 ACTIVE UNIT: U1 Category -> COMPLETE. ACTIVE UNIT: U2 Product ->
-COMPLETE (user-approved 2026-08-21; see U2 checkpoint below). NEXT UNIT:
-U3 ProductVariant + Price — NOT started; awaiting explicit user approval.
+COMPLETE (user-approved 2026-08-21; see U2 checkpoint below). ACTIVE UNIT:
+U3 ProductVariant + Price -> COMPLETE (resumed 2026-08-22, see U3 checkpoint
+below). NEXT UNIT: U4 Inventory — NOT started; awaiting explicit user
+approval.
 Scope per assessment section 15: schema+migration, nested create/list under
 product, flat /variants/:id manage, price upsert, tests, gate. No Inventory/
 Cart/Order/Payment work in that unit.
@@ -1715,3 +1717,173 @@ user approval before any code. Will reuse every convention validated in
 U1/U2 (tenant-scoped model registration, RBAC five-key pattern + role
 defaults, keyset pagination, PATCH semantics, P2002->409, app-side
 parent resolution, whitelist DTOs).
+
+---
+
+## U3 RESUME — 2026-08-22 (mid-implementation crash recovery)
+
+Audited at resume (before any new changes this session):
+
+GIT/WORKTREE: branch main, up to date with origin/main. Uncommitted
+changes: prisma/schema.prisma (M), src/common/database/prisma/tenant-
+scoping.extension.ts (M), src/product/product.module.ts (M). Untracked:
+prisma/migrations/20260821070000_add_product_variant_and_price/,
+src/product/dto/product-variant.dto.ts + .spec.ts,
+src/product/product-variant.service.ts + .spec.ts,
+src/product/product-variant.controller.ts. No product-variant integration
+spec yet (Test-Path false). No commit, no push, no db reset (per rules).
+
+SCHEMA: valid (prisma validate -> valid). Migration
+20260821070000_add_product_variant_and_price already applied
+(prisma migrate status -> Database schema is up to date! 10 migrations).
+Models present: ProductVariant (id, tenantId, productId, sku, name?,
+status VariantStatus ACTIVE|ARCHIVED default ACTIVE, timestamps,
+@@unique([tenantId, sku]), @@index([tenantId]), @@index([tenantId,
+createdAt, id])) + Tenant.productVariants backref + Product.variants; Price
+(id, tenantId, variantId, currency Char(3), amountMinor BigInt,
+@@unique([variantId, currency]), @@index([tenantId]),
+@@index([tenantId, createdAt, id]), CHECK amountMinor>=0). Enum
+VariantStatus. Extension TENANT_SCOPED_MODELS already contains
+ProductVariant, Price. PriceWhereUniqueInput allows variantId_currency
++ tenantId extra filter (generated client), so findUnique composite with
+tenant scoping is type-valid.
+
+CODE: DTOs validate sku/status/currency regex/amountMinor bounds + whitelist;
+service implements list/create/patch/delete + putPrice with BigInt string
+projection, batched price embedding, P2002->409, fail-closed tenant checks;
+two controllers mounted (/products/:id/variants GET|POST and /variants/:id
+PATCH|DELETE + PUT /variants/:id/price) reusing product:* RBAC keys per
+approved §10; module wires both.
+
+TESTS: jest.unit.json -> 36 suites 539 tests PASSED (+36 vs U2's 503;
+4 product suites: dto, service, variant-dto, variant-service). jest.
+integration.json -> 15 suites 418 tests PASSED (unchanged from U2; variant
+integration suite still missing). So unit part done, integration pending.
+
+DECISION: No schema/migration fix needed (Price lookup validated).
+Remaining U3 work this session: write src/product/product-variant.
+integration.spec.ts, run full VERIFY gate, then record U3 COMPLETE
+checkpoint and HARD STOP. U4 Inventory NOT started.
+
+---
+
+## U3 PRODUCTVARIANT + PRICE — COMPLETE (2026-08-22)
+
+STATUS: U3 ProductVariant + Price = COMPLETE (implemented, verified,
+documented). Scope delivered EXACTLY per approved assessment §15 U3 line:
+schema + one additive migration (ProductVariant + Price), tenant scoping,
+RBAC (reuse product:* keys, no new catalog entries), nested/list under
+product + flat manage + price upsert, DTO validation/security, keyset
+pagination, BigInt money as strings, P2002->409, product-parent resolution,
+cascade deletes. NO Inventory/Cart/Order/Payment/POS/Booking/rental work.
+HARD STOP reached: U4 NOT started; awaiting explicit user approval.
+
+MIGRATION (exactly one, additive, applied via prisma migrate deploy):
+- 20260821070000_add_product_variant_and_price
+  CREATE TYPE "VariantStatus" AS ENUM ('ACTIVE','ARCHIVED');
+  CREATE TABLE "ProductVariant" (id TEXT PK cuid, "tenantId" TEXT NOT NULL,
+  "productId" TEXT NOT NULL, sku TEXT NOT NULL, name TEXT NULL,
+  status "VariantStatus" NOT NULL DEFAULT 'ACTIVE', "createdAt"/"updatedAt"
+  TIMESTAMP(3)); CREATE TABLE "Price" (id TEXT PK cuid, "tenantId" TEXT NOT
+  NULL, "variantId" TEXT NOT NULL, currency CHAR(3) NOT NULL,
+  amountMinor BIGINT NOT NULL, "createdAt"/"updatedAt" TIMESTAMP(3),
+  CHECK ("amountMinor" >= 0)); UNIQUE "ProductVariant_tenantId_sku_key"
+  ON ("tenantId","sku"); UNIQUE "Price_variantId_currency_key" ON
+  ("variantId","currency"); indexes ("tenantId") and
+  ("tenantId","createdAt","id") on both tables plus ("productId") on
+  ProductVariant; FK ProductVariant.tenantId->Tenant CASCADE,
+  ProductVariant.productId->Product CASCADE, Price.tenantId->Tenant CASCADE,
+  Price.variantId->ProductVariant CASCADE. No existing objects modified.
+  prisma migrate status: up to date (10 migrations).
+
+FILES CHANGED (8 new/changed):
+- prisma/schema.prisma (ProductVariant model + Price model +
+  VariantStatus enum + Tenant.productVariants/prices backrefs +
+  Product.variants backref; product comment updated)
+- prisma/migrations/20260821070000_add_product_variant_and_price/migration.sql (new)
+- src/common/database/prisma/tenant-scoping.extension.ts ('ProductVariant',
+  'Price' in TENANT_SCOPED_MODELS; PriceWhereUniqueInput allows extra
+  tenantId filter so composite findUnique is valid)
+- src/product/dto/product-variant.dto.ts (new: CreateProductVariantDto
+  sku required + name/status optional, Update dto all-optional, ListQueryDto
+  extends PageQueryDto with no domain filters, PutPriceDto currency
+  /^[A-Z]{3}$/ + amountMinor @IsInt @Min(0) @Max(MAX_SAFE_INTEGER))
+- src/product/product-variant.service.ts (new: fail-closed requireTenantId,
+  extension-scoped CRUD, product-parent resolve 404, listVariants keyset
+  over (createdAt,id) with batch price embedding, P2002->409
+  'A variant with this SKU already exists in the tenant', BigInt->string
+  projection, PriceSummary with string amountMinor, putPrice read-then-write
+  with P2002 race fallback, deletes hard + cascades)
+- src/product/product-variant.controller.ts (new: two controllers —
+  ProductVariantsController on /products/:id/variants GET|POST and
+  VariantItemController on /variants/:id PATCH|DELETE + PUT /variants/:id/price;
+  PATCH D2, PUT upsert overwrite no history; guard chain JWT->
+  TenantResolutionGuard->PermissionsGuard; all routes reuse product:read/
+  create/update/delete/manage keys per §10; whitelist+transform+
+  forbidNonWhitelisted)
+- src/product/product.module.ts (wired both new controllers + ProductVariantService
+  alongside existing Product controller/service; no new module)
+- Tests (new): src/product/dto/product-variant.dto.spec.ts (dto validation
+  incl. currency regex, amountMinor bounds, whitelist), 
+  src/product/product-variant.service.spec.ts (21: fail-closed, list with
+  price embedding + cursor composition, create/update/delete, putPrice create/
+  overwrite/race fallback, 404 guards),
+  src/product/product-variant.integration.spec.ts (18: auth gates,
+  RBAC matrix manage-only/employee/owner, IDOR cross-tenant, SKU
+  uniqueness composite, product-parent 404, price upsert create/overwrite/
+  multi-currency BigInt string, currency/amount validation, unknown query
+  field + malformed cursor 400, pagination envelope asc/desc chaining,
+  cascade variant->price + product->variant+price)
+- Fix during VERIFY: src/product/product-variant.service.ts create data
+  now includes explicit tenantId (required by Prisma UncheckedCreateInput
+  types; extension also enforces it) — was relying on extension injection
+  alone, caused TS2322 build error. Unit mock expectations updated to
+  include tenantId. No behavior change (extension already set same value).
+
+VERIFICATION RESULTS (exact, full gate re-run after fixes + prettier):
+- Unit suite (jest.unit.json): 36 suites passed, 539 tests passed
+  (was 503 post-U2; +36 = variant dto/service specs 39? net +36 after
+  accounting for pre-existing counts; 4 product suites total)
+- Integration suite (jest.integration.json): 16 suites passed, 436 tests
+  passed (was 418 post-U2; +18 = the new variant integration suite exactly;
+  every pre-existing suite unchanged and green)
+- npm run format (prettier --write on product/**): clean afterwards;
+  npx prettier --check passes
+- npm run lint: 2 problems total (2 errors, 0 warnings) — BOTH the
+  documented PRE-EXISTING errors src/asset/asset.service.spec.ts:203/:221
+  (no-unsafe-assignment). Zero new lint issues after fixes (3 variant
+  files had prettier/lint errors fixed: unused import, void handling,
+  unsafe member access)
+- npm run build (nest build): success (failed once TS2322 missing
+  tenantId, fixed, then success)
+- npx prisma validate: valid. npx prisma migrate status: Database schema
+  is up to date! (10 migrations)
+
+CONVENTIONS PRESERVED: fail-closed tenant scoping (extension +
+requireTenantId defense-in-depth, tested via ProductVariant/Price being
+in TENANT_SCOPED_MODELS), server-derived tenant only, no raw SQL on
+tenant-owned data, no generic RolePermission writes, reuse of product:*
+RBAC (no new permission keys per §10 — variants/prices are product
+internals), D2 PATCH for variant updates, PUT for price upsert, no
+Category/Product regression (variant cascade tested, product delete still
+hard + cascades).
+
+KNOWN LIMITATIONS:
+- Variant list has no domain filters beyond parent productId (per approved
+  scope; status filter deferred).
+- Price history is NOT kept: PUT overwrites current row (variantId,
+  currency) — order-time snapshots will be added with OrderItem in U6.
+- Money amounts fit in Number.MAX_SAFE_INTEGER on input (@Max guard to
+  avoid JS precision loss); storage remains exact BIGINT, projection is
+  string. Larger amounts would need string-input DTO (deferred).
+- Deleting a PRODUCT cascades its variants and their prices (approved
+  model); no RESTRICT protection there.
+- Variant SKU uniqueness is (tenantId, sku) only; no cross-tenant leak.
+
+NEXT STEP: U4 Inventory — PROPOSED ONLY, awaiting explicit user approval
+before any code. Will reuse conventions validated in U1-U3 (tenant-scoped
+model, RBAC product/inventory keys, keyset pagination, P2002->409,
+app-side parent resolution, guarded conditional writes, BigInt string
+convention).
+
+HARD STOP — U3 complete; do not start U4.

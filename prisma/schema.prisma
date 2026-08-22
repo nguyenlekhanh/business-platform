@@ -224,8 +224,8 @@ model Category {
 }
 
 // ---------- commerce: products (Phase 3 U2) ----------
-// Tenant-scoped catalog item. Variants/prices are later units (U3) and are
-// NOT part of this model yet — deliberately minimal per the approved scope.
+// Tenant-scoped catalog item. Since U3 a product owns variants (Cascade);
+// prices hang off variants.
 model Product {
   id       String  @id @default(cuid())
   tenantId String
@@ -243,6 +243,8 @@ model Product {
   tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   category Category? @relation(fields: [categoryId], references: [id], onDelete: Restrict)
 
+  variants ProductVariant[]
+
   @@unique([tenantId, code])
   @@index([tenantId])
   // Keyset pagination parity with all other tenant-scoped lists.
@@ -253,6 +255,62 @@ enum ProductStatus {
   DRAFT
   ACTIVE
   ARCHIVED
+}
+
+// ---------- commerce: variants + prices (Phase 3 U3) ----------
+// A Product sells through its variants; each variant carries the SKU-level
+// identity and a set of CURRENT prices (one row per currency). Prices are
+// live values only: an upsert overwrites, NO history is kept — order-time
+// snapshots arrive with OrderItem (U6). Money is always integer minor units
+// (BigInt -> BIGINT), serialized as strings in JSON projections.
+enum VariantStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+model ProductVariant {
+  id        String @id @default(cuid())
+  tenantId  String
+  productId String
+  sku       String // unique within the tenant
+  name      String?
+
+  status VariantStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  prices Price[]
+
+  @@unique([tenantId, sku])
+  @@index([tenantId])
+  // Keyset pagination parity with all other tenant-scoped lists.
+  @@index([tenantId, createdAt, id])
+}
+
+model Price {
+  id          String @id @default(cuid())
+  tenantId    String
+  variantId   String
+  // ISO-4217 uppercase alpha-3, stored CHAR(3).
+  currency    String @db.Char(3)
+  // Exact integer minor units; never a float. Serialized as STRING in JSON.
+  amountMinor BigInt
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  // One CURRENT price per (variant, currency); updates overwrite it.
+  @@unique([variantId, currency])
+  @@index([tenantId])
+  // Keyset pagination parity with all other tenant-scoped lists.
+  @@index([tenantId, createdAt, id])
 }
 
 // ---------- identity ----------
@@ -306,6 +364,8 @@ model Tenant {
   reservations Reservation[]
   categories  Category[]
   products    Product[]
+  productVariants ProductVariant[]
+  prices      Price[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
