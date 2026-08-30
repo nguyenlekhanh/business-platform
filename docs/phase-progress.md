@@ -2258,3 +2258,47 @@ NEXT CHECKPOINT: CP3 â€” DTOs
 Implement CreatePaymentDto, PaymentListQueryDto per approved assessment.
 
 HARD STOP â€” U7 CP2 complete; do not start CP3 without explicit approval.
+
+
+---
+
+## U7 PAYMENT â€” CP3 DTOS COMPLETE (2026-08-29)
+
+STATUS: U7 CP3 = COMPLETE (implemented, verified, documented).
+Scope delivered EXACTLY per approved U7 assessment CP3: CreatePaymentDto with
+orderId and method only, whitelist validation rejecting tenantId/amountMinor/
+currency/status/id/timestamps, no PaymentListQueryDto (no list endpoint required).
+
+FILES CREATED (2):
+- src/payment/dto/payment.dto.ts (CreatePaymentDto: orderId:string, method:string,
+  @IsString @IsNotEmpty @MaxLength(50); whitelist rejects tenantId, amountMinor,
+  currency, status, id, timestamps)
+- src/payment/dto/payment.dto.spec.ts (13 tests: valid input, missing/empty method,
+  max length, whitelist rejection of tenantId/amountMinor/currency/status/id/
+  timestamps/unknown fields)
+
+VERIFICATION RESULTS (exact, full gate re-run):
+- Unit suite (jest.unit.json): 43 suites passed, 605 tests passed
+  (+1 suite, +13 tests from payment dto).
+- Integration suite (jest.integration.json): 19 suites passed, 524 tests passed
+  (unchanged from CP2).
+- npm run format: clean (prettier --write on src/payment/dto/** then --check passes).
+- npm run lint: 2 problems total (2 errors) â€” BOTH pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment).
+  Zero new lint issues introduced by U7 CP3.
+- npm run build (nest build): success.
+- npx prisma validate: valid.
+- npx prisma migrate status: Database schema is up to date! (14 migrations).
+- npx prisma generate: v6.19.3.
+
+CONVENTIONS PRESERVED: DTO follows exact U1â€“U6 patterns (class-validator decorators,
+whitelist + forbidNonWhitelisted at controller level, no client-supplied tenantId/
+amount/currency/status). No PaymentListQueryDto created (no list endpoint per
+assessment). MaxLength(50) on method matches free-form method field constraint.
+
+NEXT CHECKPOINT: CP4 â€” PaymentService T5 Create Payment
+Implement createPayment(orderId, method): validate Order PENDING + no CAPTURED
+payment exists, create PROCESSING row with amount/currency from Order,
+return PaymentSummary.
+
+HARD STOP â€” U7 CP3 complete; do not start CP4 without explicit approval.
