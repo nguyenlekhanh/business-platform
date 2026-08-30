@@ -152,6 +152,7 @@ model Customer {
   // Phase 2J keyset pagination (see Asset).
   @@index([tenantId, createdAt, id])
   reservations Reservation[]
+  orders       Order[]
 }
 
 // ---------- reservations (time-bound holds on rentable equipment) ----------
@@ -283,9 +284,10 @@ model ProductVariant {
   tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  prices    Price[]
-  inventory Inventory?
-  cartItems CartItem[]
+  prices     Price[]
+  inventory  Inventory?
+  cartItems  CartItem[]
+  orderItems OrderItem[]
 
   @@unique([tenantId, sku])
   @@index([tenantId])
@@ -382,6 +384,96 @@ model CartItem {
   @@index([variantId])
 }
 
+// ---------- commerce: orders (Phase 3 U6) ----------
+// Order is financial history: PENDING -> PAID|CANCELLED, PAID terminal.
+// Stock is decremented atomically on creation and restocked on cancel.
+// Snapshots preserve product/variant names and pricing at order time.
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
+model Order {
+  id          String      @id @default(cuid())
+  tenantId    String
+  userId      String
+  customerId  String?
+  status      OrderStatus @default(PENDING)
+  currency    String      @db.Char(3)
+  subtotalMinor BigInt
+  cancelledAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  items    OrderItem[]
+  payments Payment[]
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt, id])
+  @@index([tenantId, status])
+  @@index([customerId])
+}
+
+model OrderItem {
+  id              String @id @default(cuid())
+  tenantId        String
+  orderId         String
+  variantId       String
+  productName     String
+  variantName     String?
+  sku             String
+  quantity        Int
+  currency        String @db.Char(3)
+  unitAmountMinor BigInt
+  lineTotalMinor  BigInt
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  order   Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId])
+  @@index([orderId])
+  @@index([variantId])
+}
+
+// ---------- commerce: payments (Phase 3 U7) ----------
+// Payment records for order capture. Simulated gateway only (no external providers).
+// Status: PROCESSING -> CAPTURED | FAILED (terminal, immutable).
+// Amount/currency derived from Order at creation (full-amount invariant).
+enum PaymentStatus {
+  PROCESSING
+  CAPTURED
+  FAILED
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  tenantId    String
+  orderId     String
+  status      PaymentStatus @default(PROCESSING)
+  method      String
+  amountMinor BigInt
+  currency    String        @db.Char(3)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  order  Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt, id])
+  @@index([orderId])
+}
+
 // ---------- identity ----------
 model User {
   id           String       @id @default(cuid())
@@ -393,6 +485,7 @@ model User {
   memberships  Membership[]
   refreshTokens RefreshToken[]
   carts        Cart[]
+  orders       Order[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -439,6 +532,9 @@ model Tenant {
   inventories Inventory[]
   carts       Cart[]
   cartItems   CartItem[]
+  orders      Order[]
+  orderItems  OrderItem[]
+  payments    Payment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

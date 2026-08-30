@@ -186,9 +186,14 @@ export class CustomerService {
     try {
       await this.prisma.customer.delete({ where: { id } });
     } catch (error) {
-      // Reservation.customerId is ON DELETE RESTRICT (Phase 2G): business
-      // history must survive counterparty removal.
+      // RESTRICT history: Reservation.customerId (Phase 2G) and Order.customerId (Phase 3 U6)
       if (this.isP2003(error)) {
+        const msg = String((error as { message?: string }).message ?? '');
+        if (msg.includes('Order')) {
+          throw new ConflictException(
+            'Customer has orders and cannot be deleted',
+          );
+        }
         throw new ConflictException(
           'Customer has reservations and cannot be deleted',
         );

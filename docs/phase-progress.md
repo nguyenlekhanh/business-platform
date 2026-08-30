@@ -1,6 +1,6 @@
-# Project Phase Progress / AI Handoff
+﻿# Project Phase Progress / AI Handoff
 
-Project: `saas-platform-backend@0.1.0` — Modular multi-tenant SaaS backend
+Project: `saas-platform-backend@0.1.0` â€” Modular multi-tenant SaaS backend
 (NestJS 11 + PostgreSQL + Prisma 6.19.3 + Redis). Workspace:
 `C:\khanh\python\12\downloads\vibecode\OpenCode\5`.
 
@@ -10,15 +10,15 @@ history.
 
 ## Authoritative Roadmap (CORRECTED 2026-08-21)
 
-- Phase 0 — Architecture / Rules
-- Phase 1 — Project Foundation
-- Phase 2 — Auth + Multi-tenant
-- Phase 3 — Core Commerce
-- Phase 4 — POS + Offline Sync
-- Phase 5 — Booking / Service
-- Phase 6 — Logistics
-- Phase 7 — AI/ML
-- Phase 8 — Production / Scale
+- Phase 0 â€” Architecture / Rules
+- Phase 1 â€” Project Foundation
+- Phase 2 â€” Auth + Multi-tenant
+- Phase 3 â€” Core Commerce
+- Phase 4 â€” POS + Offline Sync
+- Phase 5 â€” Booking / Service
+- Phase 6 â€” Logistics
+- Phase 7 â€” AI/ML
+- Phase 8 â€” Production / Scale
 
 RULES:
 - No artificial sub-phases (2K/2L/...). Remaining work is checkpoints inside
@@ -34,9 +34,9 @@ RULES:
 
 ## Current Phase
 
-- Phase: 3 — Core Commerce (authoritative roadmap: 0→1→2→3→4 POS→5
-  Booking→6 Logistics→7 AI/ML→8 Production; NO 2K/2L sub-phases)
-- Status: ASSESSMENT COMPLETE (read-only) — awaiting explicit user approval
+- Phase: 3 â€” Core Commerce (authoritative roadmap: 0â†’1â†’2â†’3â†’4 POSâ†’5
+  Bookingâ†’6 Logisticsâ†’7 AI/MLâ†’8 Production; NO 2K/2L sub-phases)
+- Status: ASSESSMENT COMPLETE (read-only) â€” awaiting explicit user approval
   of the architecture below BEFORE Unit U1 implementation starts. No
   production/schema/migration code has been touched for Phase 3.
 - Last updated: 2026-08-22 (U5 Cart COMPLETE this session)
@@ -56,11 +56,11 @@ RULES:
 
 ---
 
-# Phase 3 — Core Commerce: Architecture Assessment (READ-ONLY)
+# Phase 3 â€” Core Commerce: Architecture Assessment (READ-ONLY)
 
 ## 0. Ground rules honored
 Rental residue FROZEN: src/reservation/, src/equipment/, rental aspects of
-src/customer/ + src/asset/, migration 20260821020000 constraints — no
+src/customer/ + src/asset/, migration 20260821020000 constraints â€” no
 expansion/refactor/rename/deletion. Additive migrations only, migrate deploy,
 never db push/reset, never touch existing migrations. Tenant isolation via the
 centralized extension stays fail-closed; RBAC and auth untouched.
@@ -68,14 +68,14 @@ centralized extension stays fail-closed; RBAC and auth untouched.
 ## 1. Domain boundaries
 Six NEW NestJS modules, one aggregate root each, plus additive links:
 - catalog: Category + Product + ProductVariant + Price (one module
-  `src/catalog/`? NO — keep separate small modules per roadmap units:
+  `src/catalog/`? NO â€” keep separate small modules per roadmap units:
   `src/category/`, `src/product/` (Product+Variant+Price share one bounded
   context: variants/prices are product internals exposed via product-centric
   APIs), `src/inventory/`, `src/cart/`, `src/order/` (Order+OrderItem),
   `src/payment/`. Cross-module access only via services, never raw prisma on
   another module's models except inside order-service transactions where
   atomicity demands it (documented per-call).
-- Customer participates ONLY as an optional reference on Order (see §3).
+- Customer participates ONLY as an optional reference on Order (see Â§3).
 
 ## 2. Prisma models & relationships (all tenant-scoped)
 ```
@@ -125,17 +125,17 @@ Options analyzed:
   mapping ('Customer has orders and cannot be deleted') so integrity errors
   surface as 409 instead of raw 500. This single touch to frozen-adjacent
   code is FLAGGED for explicit approval.
-- B) New parallel `CommerceCustomer` model — zero contact with frozen code,
+- B) New parallel `CommerceCustomer` model â€” zero contact with frozen code,
   but splits the registry permanently; every later phase reconciles two
   sources of truth. Rejected.
 RECOMMENDATION: Option A. The customer link on orders is OPTIONAL (nullable)
 so the entire commerce flow works with zero customers.
 
 ## 4. Money & currency (decided BEFORE any price/order/payment code)
-- Representation: INTEGER MINOR UNITS (`amountMinor`, BigInt → BIGINT).
+- Representation: INTEGER MINOR UNITS (`amountMinor`, BigInt â†’ BIGINT).
   No floats anywhere. All arithmetic is exact BigInt integer math; line total
-  = quantity × unitAmountMinor (exact). No rounding rules exist in Phase 3
-  because there are NO percentage discounts/taxes yet — division never occurs.
+  = quantity Ã— unitAmountMinor (exact). No rounding rules exist in Phase 3
+  because there are NO percentage discounts/taxes yet â€” division never occurs.
 - Currency: ISO-4217 uppercase alpha-3, stored `Char(3)`, DTO-validated
   `^[A-Z]{3}$`. One order = ONE currency (all items validated uniform).
 - API serialization: BigInt amounts serialize as STRINGS in JSON projections
@@ -147,13 +147,13 @@ so the entire commerce flow works with zero customers.
 ## 5. Inventory semantics & concurrency (decided up front)
 - Semantics: single pool per variant, no multi-location (POS multi-store stock
   belongs to Phase 4). `quantityOnHand` = physically held AND implicitly
-  reserved-by-open-orders (see mutation rule). Available-to-sell = onHand −
+  reserved-by-open-orders (see mutation rule). Available-to-sell = onHand âˆ’
   sum(open-order quantities) is NOT stored; instead stock is DECREMENTED AT
   ORDER CREATION and RESTOCKED ON CANCELLATION ("decrement-on-order").
   WHY: one source of truth, no reservation ledger, oversell impossible.
 - Mutations ONLY via InventoryService.adjust(): guarded conditional write
   `updateMany({where:{variantId, tenantId, quantityOnHand:{gte:-delta}},
-  data:{quantityOnHand:{increment:delta}}})` — count 0 → 409
+  data:{quantityOnHand:{increment:delta}}})` â€” count 0 â†’ 409
   ('Insufficient stock'). Row created lazily (missing row == 0 on hand).
 - Concurrency strategy: atomic conditional UPDATEs (no read-modify-write),
   executed INSIDE interactive transactions where part of larger flows. Two
@@ -164,12 +164,12 @@ so the entire commerce flow works with zero customers.
 ## 6. Cart semantics
 - Cart belongs to the authenticated principal (member userId), tenant-scoped.
   One OPEN cart per (tenant,user) enforced service-side find-or-create
-  (small create race tolerated — extra OPEN cart is inert; documented
+  (small create race tolerated â€” extra OPEN cart is inert; documented
   limitation). Items merge by @@unique([cartId,variantId]).
 - Prices shown live from current Price rows at read time; carts hold NO money
   fields and reserve NO stock. Currency mix allowed in cart display but
   rejected at checkout if items span currencies.
-- Conversion happens inside the order transaction: cart → CONVERTED.
+- Conversion happens inside the order transaction: cart â†’ CONVERTED.
 
 ## 7. State machines (no client-controlled status anywhere; DTOs exclude
 status fields; whitelist rejects them)
@@ -201,15 +201,15 @@ Category/Product/Variant DELETE = hard delete; RESTRICT/Cascade rules make
 referenced rows block deletion (P2002/P2003 mapped to clear 409s); ARCHIVED
 statuses provide soft-retirement instead. Order/Payment: NO delete endpoints
 (financial history). Cart: owner may discard own OPEN cart (DELETE /cart).
-Customer delete blocked while orders exist (additive P2003 branch, §3).
+Customer delete blocked while orders exist (additive P2003 branch, Â§3).
 
 ## 10. RBAC permissions (catalog additions; existing keys untouched)
 Categories: category:read|create|update|delete|manage (new 'categories')
 Products:  product:* five-key pattern (new 'products' category)
 Inventory: inventory:read | inventory:manage (deliberate deviation: inventory
-           has no entity lifecycle, adjustment-only — documented)
+           has no entity lifecycle, adjustment-only â€” documented)
 Cart:      cart:manage (owner-scoped self-service)
-Orders:    order:read|create|delete|manage — DELETE key = cancel, mirroring
+Orders:    order:read|create|delete|manage â€” DELETE key = cancel, mirroring
            the established reservation DELETE=cancel precedent; no UPDATE
            key (orders have no editable fields post-creation)
 Payments:  payment:read|create|manage (capture/fail = manage)
@@ -217,14 +217,14 @@ Role defaults (consistent with existing): admin += every new *_MANAGE;
 employee += *_READ + CART_MANAGE + ORDER_CREATE + PAYMENT_CREATE.
 Owner keeps semantic all-permissions (no grants needed).
 
-## 11. API boundaries (PATCH on ALL new domains per user direction —
+## 11. API boundaries (PATCH on ALL new domains per user direction â€”
 existing domains stay PUT; divergence is deliberate and documented)
 /categories GET(list paginated)|POST ; /categories/:id GET|PATCH|DELETE
 /products  GET(list; filters status,categoryId)|POST ;
 /products/:id GET|PATCH|DELETE
 /products/:id/variants GET|POST ; /variants/:id PATCH|DELETE
 /variants/:id/price PUT {currency, amountMinor} (upsert per (variant,currency))
-/inventory/:variantId GET ; /inventory/adjust POST {variantId, delta≠0,
+/inventory/:variantId GET ; /inventory/adjust POST {variantId, deltaâ‰ 0,
 reason?}
 /cart GET(own open cart w/ live totals) ; /cart/items POST|PATCH(/:itemId)|
 DELETE(/:itemId) ; DELETE /cart (discard)
@@ -242,7 +242,7 @@ Guard chain/validation/pagination conventions identical to StoreController.
 @@index([orderId])+@@index([variantId]); Payment @@index([orderId]).
 Handwritten-SQL CHECKs (deploy-only discipline): amountMinor>=0,
 quantityOnHand>=0, order/item quantity>0, lineTotal = qty*unit (CHECK via
-generated column? NO — plain CHECK comparing stored columns).
+generated column? NO â€” plain CHECK comparing stored columns).
 
 ## 13. Migration strategy
 ONE additive handwritten-SQL migration per unit that changes schema
@@ -263,50 +263,50 @@ currency-mix rejection), state-machine matrices (order/payment), concurrency
 transaction rollback (forced failure leaves stock untouched), cart ownership
 (user B cannot read/mutate user A's cart within same tenant).
 
-## 15. Exact incremental plan (mandatory CHANGE→VERIFY→DOC→CONTINUE loop;
+## 15. Exact incremental plan (mandatory CHANGEâ†’VERIFYâ†’DOCâ†’CONTINUE loop;
 each unit ends with its results recorded in a dedicated section here)
-U1 Category — schema+migration, module/service/controller/dto, RBAC keys,
+U1 Category â€” schema+migration, module/service/controller/dto, RBAC keys,
    dto+service+integration tests, gate. [FIRST IMPLEMENTATION UNIT]
-U2 Product — schema+migration (FK to Category), CRUD+PATCH+archive, filters,
+U2 Product â€” schema+migration (FK to Category), CRUD+PATCH+archive, filters,
    tests, gate.
-U3 ProductVariant + Price — schema+migration, nested create/list under
+U3 ProductVariant + Price â€” schema+migration, nested create/list under
    product, flat /variants/:id manage, price upsert, tests, gate.
-U4 Inventory foundation — schema+migration, adjust/read endpoints, guarded
+U4 Inventory foundation â€” schema+migration, adjust/read endpoints, guarded
    mutations, concurrency tests, gate.
-U5 Cart — schema+migration, own-cart semantics + item merge, live totals,
+U5 Cart â€” schema+migration, own-cart semantics + item merge, live totals,
    ownership isolation tests, gate.
-U6 Order + OrderItem — schema+migration, T1/T3 transactions, direct-items OR
+U6 Order + OrderItem â€” schema+migration, T1/T3 transactions, direct-items OR
    cart-checkout, snapshots, state machine, concurrency/rollback tests, gate.
-U7 Payment — schema+migration, T2/T5, full-amount invariant, idempotent
+U7 Payment â€” schema+migration, T2/T5, full-amount invariant, idempotent
    terminal states, tests, gate.
-U8 Cross-domain verification — customer-delete-with-orders 409 (the flagged
-   additive branch), end-to-end flow test (category→product→variant→price→
-   stock→cart→order→pay→cancel-restock paths), full gate.
-U9 Final Phase 3 verification — complete gate, progress-doc closure,
+U8 Cross-domain verification â€” customer-delete-with-orders 409 (the flagged
+   additive branch), end-to-end flow test (categoryâ†’productâ†’variantâ†’priceâ†’
+   stockâ†’cartâ†’orderâ†’payâ†’cancel-restock paths), full gate.
+U9 Final Phase 3 verification â€” complete gate, progress-doc closure,
    HARD STOP for Phase 4 approval.
 
 ## 16. Decisions flagged for explicit user approval (blocking U6/U7/U8, not U1)
-D1 §3 Customer Option A including the ONE additive P2003 branch in
+D1 Â§3 Customer Option A including the ONE additive P2003 branch in
    customer.service.ts delete path (frozen-adjacent file).
 D2 PATCH verb on new domains vs PUT on existing ones.
-D3 "Decrement-on-order" inventory semantics (§5) incl. no-reservation-ledger.
+D3 "Decrement-on-order" inventory semantics (Â§5) incl. no-reservation-ledger.
 D4 Capture/fail endpoints are permission-guarded staff actions simulating
    gateway confirmation (no real gateway in Phase 3).
 
 ## 17. Recommended first implementation unit
-**U1 Category** — smallest standalone slice: one model, one migration, CRUD+
+**U1 Category** â€” smallest standalone slice: one model, one migration, CRUD+
 pagination+RBAC+isolation, zero dependencies on other Commerce domains,
 exercises every convention the later units will reuse.
 
 HARD STOP: awaiting explicit approval of this assessment (or amendments)
 before any Phase 3 code is written.
 
-### PHASE 3 ASSESSMENT — APPROVED (2026-08-21, user)
-D1–D4 approved EXACTLY as assessed, plus all architecture decisions:
+### PHASE 3 ASSESSMENT â€” APPROVED (2026-08-21, user)
+D1â€“D4 approved EXACTLY as assessed, plus all architecture decisions:
 money=BigInt minor units; currency ISO-4217 Char(3); BigInt JSON as
 strings; snapshots on OrderItem/Payment; Order PENDING->PAID|CANCELLED
 (PAID terminal); status never client-writable; T1-T5 transaction
-boundaries as specified in §8. D1: reuse generic Customer, nullable
+boundaries as specified in Â§8. D1: reuse generic Customer, nullable
 Order.customerId at U6, NO CommerceCustomer, rental code stays FROZEN,
 Customer delete protection additive+narrow only. D2: PATCH on new
 Commerce APIs only. D3: single pool per variant, decrement-on-order,
@@ -320,7 +320,7 @@ COMPLETE (user-approved 2026-08-21; see U2 checkpoint below). ACTIVE UNIT:
 U3 ProductVariant + Price -> COMPLETE (resumed 2026-08-22, see U3 checkpoint
 below). ACTIVE UNIT: U4 Inventory -> COMPLETE (see U4 checkpoint below).
 ACTIVE UNIT: U5 Cart -> COMPLETE (see U5 checkpoint below).
-NEXT UNIT: U6 Order — NOT started; awaiting explicit user approval.
+NEXT UNIT: U6 Order â€” NOT started; awaiting explicit user approval.
 Scope per assessment section 15: schema+migration, nested create/list under
 product, flat /variants/:id manage, price upsert, tests, gate. No Inventory/
 Cart/Order/Payment work in that unit.
@@ -363,7 +363,7 @@ links in asset/customer services (P2003 mappings). Migration discipline stays
 DEPLOY-ONLY forever because 20260821020000 contains handwritten CHECK/EXCLUDE
 constraints that prisma migrate dev/diff would drop.
 
-## Phase 2 Remaining Work — Approved Implementation Plan
+## Phase 2 Remaining Work â€” Approved Implementation Plan
 
 ### Auth architecture assessment (Checkpoint 1, read-only)
 - auth.module.ts: JwtModule async-registered from JWT_SECRET, signOptions
@@ -375,7 +375,7 @@ constraints that prisma migrate dev/diff would drop.
 - auth.controller.ts: public register/login (ValidationPipe whitelist+
   transform+forbidNonWhitelisted at controller level); /me behind
   JwtAuthGuard. No tenant guard on auth routes (identity-level, correct).
-- login currently returns {accessToken} — will gain additive refreshToken.
+- login currently returns {accessToken} â€” will gain additive refreshToken.
 - Password handling: PasswordHashingService wraps argon2id (hash/verify).
 - Schema: User has NO token/session relations yet. No TENANT scoping applies
   to User itself (User is global identity).
@@ -388,30 +388,30 @@ constraints that prisma migrate dev/diff would drop.
 
 ### Design decisions (smallest consistent implementation)
 - Model `RefreshToken`: id cuid PK; userId FK -> User ON DELETE CASCADE;
-  tokenHash String @unique (sha256 hex of token — fast hash is appropriate
+  tokenHash String @unique (sha256 hex of token â€” fast hash is appropriate
   because tokens are 384-bit random, unlike low-entropy passwords which use
   argon2); expiresAt DateTime; revokedAt DateTime? (null = live);
   createdAt/updatedAt. Backref `refreshTokens RefreshToken[]` on User.
   NOT added to TENANT_SCOPED_MODELS (user-identity scope, like User).
 - Token material: crypto.randomBytes(48) -> base64url (~64 chars). Raw token
   NEVER persisted; only its sha256 hex.
-- TTL: constant REFRESH_TOKEN_TTL_MS = 7 days in service (no new env var —
+- TTL: constant REFRESH_TOKEN_TTL_MS = 7 days in service (no new env var â€”
   smallest change; documented).
 - login response becomes {accessToken, refreshToken} (additive field).
 - POST /auth/refresh {refreshToken}: DTO @IsString @IsNotEmpty @MaxLength(512)
   (RefreshDto, reused by logout). ALL failure classes (unknown hash / expired /
   revoked-reuse / malformed / suspended-or-deleted user) -> 401
-  UnauthorizedException('Invalid credentials') — identical message, no oracle.
+  UnauthorizedException('Invalid credentials') â€” identical message, no oracle.
   Rotation inside prisma.$transaction:
   updateMany({where:{tokenHash, revokedAt:null, expiresAt:{gt:now}},
-  data:{revokedAt:now}}) — count 0 means unknown/expired/already-revoked ->
+  data:{revokedAt:now}}) â€” count 0 means unknown/expired/already-revoked ->
   reject BEFORE issuing anything (reuse of rotated token rejected; expired
   cannot rotate); then create new row with new hash; sign new access token;
   return new pair. Reuse detection retained via revokedAt (rows never deleted).
   User re-validation mirrors JwtStrategy (exists && ACTIVE).
 - POST /auth/logout {refreshToken}: updateMany({where:{tokenHash,
   revokedAt:null}, data:{revokedAt:now}}); ALWAYS 204 regardless of
-  found/expired/revoked state — idempotent, zero existence leak, cannot
+  found/expired/revoked state â€” idempotent, zero existence leak, cannot
   affect other users/tokens (hash lookup is per-token). Historical rows kept
   for reuse detection.
 - Routes are PUBLIC (no JwtAuthGuard): both operate on the presented refresh
@@ -459,7 +459,7 @@ constraints that prisma migrate dev/diff would drop.
       byte-identical by design; refresh inequality + /me checks cover it).
       VERIFIED: npx jest --config jest.integration.json src/auth -> 19/19.
 
-### Phase 2 — COMPLETE
+### Phase 2 â€” COMPLETE
 
 All Phase 2 exit criteria verified against the codebase on 2026-08-21:
 registration/login/JWT/Argon2id, /auth/me, refresh rotation + logout,
@@ -486,22 +486,22 @@ user re-validation, race-safe liveness guard, generic 401s; POST
 8 new unit tests (32 total in src/auth) + 7 new integration tests (19
 total). No changes to JwtAuthGuard/JwtStrategy behavior; no tenant-scope
 changes; additive-only migration.
-- [x] Checkpoint 5: FULL gate — DONE (results in "Final gate results"
+- [x] Checkpoint 5: FULL gate â€” DONE (results in "Final gate results"
       above). Phase 2 is marked COMPLETE; HARD STOP for approval was
-      reached. Next step: user approval to begin Phase 3 — Core Commerce.
+      reached. Next step: user approval to begin Phase 3 â€” Core Commerce.
 
 ---
 
-# Phase 2J — List Pagination & Filters
+# Phase 2J â€” List Pagination & Filters
 
 ### Status
-COMPLETE — full verification gate passed (see Final Report below).
+COMPLETE â€” full verification gate passed (see Final Report below).
 
 ### Final Report
 - OBJECTIVE: replace the five unbounded bare-array list endpoints with a
   uniform cursor/keyset-paginated + filtered contract, shared across all
   tenant-scoped domains.
-- SHARED ARCHITECTURE: `src/common/pagination/` — cursor.ts (codec),
+- SHARED ARCHITECTURE: `src/common/pagination/` â€” cursor.ts (codec),
   pagination-query.dto.ts (PageQueryDto base), paginate.ts (buildOrderBy,
   buildKeysetWhere OR-expansion asc/desc, fetchPage limit+1/trim/encode,
   encodeRowCursor, dateKeyFromCursor NaN->400, resolveListContinuation).
@@ -531,8 +531,8 @@ COMPLETE — full verification gate passed (see Final Report below).
   so the phase added net +52 unit and +36 integration tests.
 - GATE RESULTS: format PASS (no diffs); lint PASS with exactly the 2 known
   pre-existing errors in src/asset/asset.service.spec.ts (originally :170/:188,
-  shifted to :203/:221 by legitimate additions above — untouched per rule);
-  build PASS (after widening buildKeysetWhere primaryValue to accept Date —
+  shifted to :203/:221 by legitimate additions above â€” untouched per rule);
+  build PASS (after widening buildKeysetWhere primaryValue to accept Date â€”
   surfaced only after prisma generate refreshed client types); unit PASS;
   integration PASS; prisma validate -> valid; migrate status -> up to date
   (6 migrations); git diff --check clean (LF/CRLF warnings are informational).
@@ -557,7 +557,7 @@ COMPLETE — full verification gate passed (see Final Report below).
       (`src/common/pagination/pagination-query.dto.ts`: limit 1..100 via
       @Type+@IsInt+@Min/@Max, cursor @IsString, order @IsIn asc|desc;
       DEFAULT_PAGE_SIZE=20, MAX_PAGE_SIZE=100).
-      FIX NEEDED: setup-env.ts now imports 'reflect-metadata' — class-
+      FIX NEEDED: setup-env.ts now imports 'reflect-metadata' â€” class-
       transformer's @Type reads design:type metadata at decoration time;
       production gets it from Nest bootstrap, standalone unit suites did not.
       Additive one line; verified no impact on existing dto suites.
@@ -577,7 +577,7 @@ COMPLETE — full verification gate passed (see Final Report below).
       startAt<to AND endAt>from; from>=to -> 400 'from must be before to';
       fingerprint over normalized filters; envelope Paginated<Summary>.
       controller list(@Query()).
-      BUG FOUND+FIXED: cursor-following pages returned HTTP 500 — keyset
+      BUG FOUND+FIXED: cursor-following pages returned HTTP 500 â€” keyset
       predicate passed epoch-millis numbers into DateTime columns
       (createdAt/startAt); unit mocks hid it, real Prisma rejected it. Fix:
       DATE_SORT_FIELDS set converts cursor millis back to Date instants for
@@ -597,7 +597,7 @@ COMPLETE — full verification gate passed (see Final Report below).
       EquipmentListQueryDto (type enum filter); service listEquipment(query)
       keyset via resolveListContinuation; controller @Query().
       BUG FOUND+FIXED: controller referenced EquipmentListQueryDto WITHOUT
-      importing it — decorator received undefined, ValidationPipe silently
+      importing it â€” decorator received undefined, ValidationPipe silently
       no-op'd on queries (raw strings reached Prisma -> 500s / non-envelope
       bodies). Fix: proper import in equipment.controller.ts. Lesson: always
       verify DTO import in controllers, not just services.
@@ -606,7 +606,7 @@ COMPLETE — full verification gate passed (see Final Report below).
 - [x] Steps 17-18: Customer domain COMPLETE.
       CustomerListQueryDto (status enum filter); service listCustomers(query)
       keyset via shared helpers; controller @Query() (DTO import verified this
-      time). TEST-DATA FIX: first integration run 1 failure — fixture used
+      time). TEST-DATA FIX: first integration run 1 failure â€” fixture used
       status 'ARCHIVED' which is not a CustomerStatus enum value (schema has
       ACTIVE|INACTIVE); switched fixture to INACTIVE. Production code correct.
       VERIFIED: customer.service.spec.ts 20/20;
@@ -614,10 +614,10 @@ COMPLETE — full verification gate passed (see Final Report below).
 - [x] Steps 19-20: Store domain COMPLETE.
       StoreListQueryDto (status + type enum filters); service listStores(query)
       keyset via shared helpers; controller @Query() with DTO import verified.
-      TEST FIXES: (1) unit expectation corrected — service composes both
+      TEST FIXES: (1) unit expectation corrected â€” service composes both
       equality filters into ONE object inside AND ([{status,type}]), not two;
       semantically identical in Prisma. (2) 'ignores a tenantId query
-      parameter' test updated to expect 400 — approved Phase 2J behavior
+      parameter' test updated to expect 400 â€” approved Phase 2J behavior
       change: unknown query fields are rejected by forbidNonWhitelisted, so a
       client can no longer pass tenantId via query at all (isolation still
       server-enforced). (3) owner list test moved to envelope.
@@ -627,7 +627,7 @@ COMPLETE — full verification gate passed (see Final Report below).
       Equipment, Customer, Reservation, Store; @@index([tenantId, startAt,
       id]) added to Reservation; existing indexes kept.
       NEW migration 20260821030000_add_list_pagination_indexes (handwritten
-      SQL, Prisma-default index names, CREATE INDEX only — additive).
+      SQL, Prisma-default index names, CREATE INDEX only â€” additive).
       VERIFIED: prisma validate -> valid; prisma migrate deploy -> applied
       (6 migrations found, all applied); prisma generate -> client v6.19.3
       generated; prisma migrate status -> Database schema is up to date!
@@ -660,7 +660,7 @@ COMPLETE — full verification gate passed (see Final Report below).
          @IsIn(SORT_DIRECTIONS) -> removed; reservation.service.spec.ts unsafe
          any member access on mock.calls[0][0] -> typed tuple cast.
          Remaining lint = exactly the 2 pre-existing errors
-         (asset.service.spec.ts, now at :203/:221 — shifted from :170/:188 by
+         (asset.service.spec.ts, now at :203/:221 â€” shifted from :170/:188 by
          additions above them; untouched per standing rule).
       2. BUILD (2 TS2345 errors, one root cause): buildKeysetWhere declared
          primaryValue as CursorKeyValue (string|number) but date sort columns
@@ -700,14 +700,14 @@ utility across domains.
    server-side. Default preserved `createdAt asc`. Reservations may sort by
    `startAt`; direction param `order` asc|desc. Sort spec EMBEDDED in cursor so
    continuations cannot mix sorts.
-3. Cursor: opaque base64url(JSON {v,s,d,k,f}) — version, sort, direction,
+3. Cursor: opaque base64url(JSON {v,s,d,k,f}) â€” version, sort, direction,
    [primary, id] key, 8-hex filter fingerprint. Decode strictly -> 400 on any
    garbage/tamper/version/filter mismatch. Forward-only (next cursor) this
    phase.
 4. Envelope for ALL five lists: `{ data: [...], meta: { nextCursor: null |
    string } }`. Intentional breaking change from bare arrays; no totalCount
    (COUNT(*) would negate keyset wins).
-5. Filters — reservations (pilot): status (single enum), customerId,
+5. Filters â€” reservations (pilot): status (single enum), customerId,
    equipmentId (equality; unknown ids -> empty page, no existence leak),
    from/to with OVERLAP semantics (`startAt < to AND endAt > from`, mirrors
    EXCLUDE constraint; from<to enforced 400). Others: status/type equality
@@ -717,7 +717,7 @@ utility across domains.
 7. Shared utility `src/common/pagination/`: cursor.ts, pagination-query.dto.ts
    (PageQueryDto base), paginate.ts (pure builders: keyset where via
    OR-expansion, orderBy, Paginated<T> envelope type). Pure functions, no
-   generic-delegate magic — services compose them explicitly.
+   generic-delegate magic â€” services compose them explicitly.
 8. Tenant isolation unchanged: extension still injects tenantId into findMany;
    forged cursors can only add column predicates INSIDE caller's tenant.
 9. New composite indexes: [tenantId, createdAt, id] x5 models;
@@ -736,11 +736,11 @@ doc. OUT: offset mode, text search, multi-status, totalCount, prev-cursors,
 member/role list pagination, rate limiting, changing default ordering.
 
 ### Verification
-Not run — nothing implemented. Assessment produced from read-only inspection.
+Not run â€” nothing implemented. Assessment produced from read-only inspection.
 
 ---
 
-# Phase 2I — Window-Aware Reservation Lifecycle Policy
+# Phase 2I â€” Window-Aware Reservation Lifecycle Policy
 
 ### Status
 COMPLETE
@@ -763,7 +763,7 @@ equality against the boundary instant.
 - NO commit/push. NO migration (no schema change).
 
 ### Migration Plan
-NONE REQUIRED — policy-only change in application code.
+NONE REQUIRED â€” policy-only change in application code.
 
 ### Decisions / Constraints
 - Clock source: system UTC (`new Date()`) inside the service. WHY: existing
@@ -780,15 +780,15 @@ NONE REQUIRED — policy-only change in application code.
 - Permissions/routes unchanged (still update|manage).
 
 ### Completed
-- [x] Service time gate — `transition()` gained optional
+- [x] Service time gate â€” `transition()` gained optional
       `timeGate?: { field: 'startAt'|'endAt'; message }`; checked AFTER the
       status check; rejects with 409 when `boundary.getTime() > Date.now()`.
       Constants NOT_BEFORE_START / NOT_BEFORE_END added; class + method docs
       updated. VERIFIED: service spec 46/46 (4 new gating tests).
-      NOTE: first run had 1 failure — test-data bug (used 2026-06-01 as
+      NOTE: first run had 1 failure â€” test-data bug (used 2026-06-01 as
       "future" but today is 2026-08-21); fixed with far-future 2099 instants.
       Production code was correct; no production change needed for this.
-- [x] Integration tests — 4 real-clock gating tests added
+- [x] Integration tests â€” 4 real-clock gating tests added
       (start-too-early-409+row-untouched, start-after-open-200,
       complete-too-early-409+row-still-ACTIVE, complete-after-end-200).
       REQUIRED ADJUSTMENTS (all test-side, recorded):
@@ -802,7 +802,7 @@ NONE REQUIRED — policy-only change in application code.
       VERIFIED: reservation integration suite 61/61 passing.
 
 ### Current Task
-None — phase complete. Next phase requires user approval.
+None â€” phase complete. Next phase requires user approval.
 
 Plan (all done):
 1. [x] Service: time gate + unit tests (46/46)
@@ -812,11 +812,11 @@ Plan (all done):
 ### Phase Completion Summary
 - `transition()` now accepts an optional time gate and enforces it after the
   status check: start gated on startAt, complete gated on endAt
-  (`boundary.getTime() > Date.now()` → 409). New constants NOT_BEFORE_START /
+  (`boundary.getTime() > Date.now()` â†’ 409). New constants NOT_BEFORE_START /
   NOT_BEFORE_END.
-- +4 unit tests (window-aware gating with frozen clock) → reservation service
+- +4 unit tests (window-aware gating with frozen clock) â†’ reservation service
   spec 46/46; project unit total 371/371 (27 suites).
-- +4 integration tests (real-clock gating) → reservation integration suite
+- +4 integration tests (real-clock gating) â†’ reservation integration suite
   61/61; project integration total 336/336 (13 suites).
 - Test-side adjustments recorded in Completed section: nine 2H lifecycle
   fixtures moved to past windows (policy made future-window starts correctly
@@ -824,7 +824,7 @@ Plan (all done):
 
 ### Verification
 - format PASS (prettier reformatted reservation.service.ts + integration spec)
-- lint PASS by standing rule — only the 2 PRE-EXISTING errors remain
+- lint PASS by standing rule â€” only the 2 PRE-EXISTING errors remain
   (src/asset/asset.service.spec.ts:170,188)
 - build PASS
 - test:unit PASS 371/371, 27 suites
@@ -855,12 +855,12 @@ of stale reservations, reservation listing filters/pagination, audit logging.
 - Lifecycle tests must use PAST windows for successful start/complete paths;
   future windows now correctly yield 409 from the clock gate.
 - Integration fixtures on shared equipment must stay non-overlapping across
-  the whole file — huge [past, far-future) spans will collide with other rows
+  the whole file â€” huge [past, far-future) spans will collide with other rows
   and cascade into undefined-id failures downstream.
 
 ---
 
-# Phase 2H — Reservation Lifecycle Transitions
+# Phase 2H â€” Reservation Lifecycle Transitions
 
 ### Status
 COMPLETE
@@ -881,21 +881,21 @@ become usable through a strict state machine.
 - NO commit/push.
 
 ### Migration Plan
-NONE REQUIRED — the `ReservationStatus` enum already contains ACTIVE and
+NONE REQUIRED â€” the `ReservationStatus` enum already contains ACTIVE and
 COMPLETED in schema and database (migration `20260821020000`). The exclusion
 constraint `Reservation_no_overlap` already covers statuses
 ('RESERVED','ACTIVE') only, so COMPLETED automatically frees the slot. No
 schema change, no new migration, no destructive operations.
 
 ### Decisions / Constraints
-- Permissions: REUSE existing keys — both endpoints use
+- Permissions: REUSE existing keys â€” both endpoints use
   `RequireAnyPermission(RESERVATION_UPDATE, RESERVATION_MANAGE)`, consistent
   with PUT (lifecycle transitions are mutations of an existing row). No new
   catalog entries, no role-default changes. WHY: avoids permission-data churn;
   least privilege unchanged.
 - Strict state machine, no clock enforcement in this phase: starting does not
   require `now >= startAt` and completing does not require
-  `now >= endAt` (operational flexibility). Deferred policy decision — record
+  `now >= endAt` (operational flexibility). Deferred policy decision â€” record
   if later phases need window-aware gating.
 - No overlap re-check on transitions: start keeps an already-held window;
   complete frees the slot via the existing constraint WHERE clause.
@@ -904,24 +904,24 @@ schema change, no new migration, no destructive operations.
 - Unknown id -> 404 `'Reservation not found'` (same as other mutations).
 
 ### Completed
-- [x] Service transitions — `startReservation`/`completeReservation` + shared
+- [x] Service transitions â€” `startReservation`/`completeReservation` + shared
       private `transition(id, fromStatus, toStatus, conflictMessage)` helper in
       `src/reservation/reservation.service.ts`; doc-comment lifecycle line
       updated; new constants NOT_STARTABLE / NOT_COMPLETABLE.
       VERIFIED: service spec 42/42 (11 new lifecycle tests).
-- [x] Controller routes — `POST /reservations/:id/start` and
+- [x] Controller routes â€” `POST /reservations/:id/start` and
       `POST /reservations/:id/complete` with
       `@RequireAnyPermission(RESERVATION_UPDATE, RESERVATION_MANAGE)` and
       `@HttpCode(HttpStatus.OK)` in `src/reservation/reservation.controller.ts`.
       BUG FOUND+FIXED during verification: without @HttpCode, NestJS @Post
       defaults to 201 CREATED; all transition tests received 201 instead of
       200. Fix = production code corrected (@HttpCode(HttpStatus.OK) on both
-      routes) — NOT a test weakening.
+      routes) â€” NOT a test weakening.
       VERIFIED: reservation integration suite 57/57 passing (11 new lifecycle
       tests incl. state-machine matrix, rebook-after-completed-slot, IDOR,
       read-only-403-with-row-untouched, manage-only-can-start).
       Build verified via `npm run build` PASS.
-- [x] Full verification gate — see Verification below; all green.
+- [x] Full verification gate â€” see Verification below; all green.
 
 ### Current Task
 None. Phase 2H COMPLETE.
@@ -935,14 +935,14 @@ Plan:
 ### Verification
 - format: PASS (`npm run format`; reformatted controller + integration spec)
 - lint: PASS except 2 PRE-EXISTING errors
-  (src/asset/asset.service.spec.ts:170,188 — unchanged, out of scope)
+  (src/asset/asset.service.spec.ts:170,188 â€” unchanged, out of scope)
 - build: PASS
-- unit tests: 367/367 passing (27 suites) — was 356 before 2H (+11 lifecycle)
-- integration tests: 332/332 passing (13 suites) — was 321 before 2H (+11
+- unit tests: 367/367 passing (27 suites) â€” was 356 before 2H (+11 lifecycle)
+- integration tests: 332/332 passing (13 suites) â€” was 321 before 2H (+11
   lifecycle; reservation suite now 57 tests)
 - migration status: "Database schema is up to date!" (5 migrations; NO new
   migration required for 2H)
-- diff check: clean (LF→CRLF notices only)
+- diff check: clean (LFâ†’CRLF notices only)
 
 ### Files Changed
 - `src/reservation/reservation.service.ts` (transitions + helper + docs)
@@ -952,11 +952,11 @@ Plan:
 
 ### Known Problems
 - FOUND+FIXED during 2H: transition routes returned 201 CREATED (NestJS @Post
-  default) instead of 200 — fixed with `@HttpCode(HttpStatus.OK)` on both
+  default) instead of 200 â€” fixed with `@HttpCode(HttpStatus.OK)` on both
   routes (production fix; tests were correct). See Completed section.
 - Carried context: 2 pre-existing lint errors
   (`src/asset/asset.service.spec.ts:170,188`) remain intentionally unfixed;
-  lint exits non-zero because of them — avoid `if ($?)` chaining in PowerShell.
+  lint exits non-zero because of them â€” avoid `if ($?)` chaining in PowerShell.
 
 ### Next Step
 None. Phase COMPLETE. Await user approval for the next phase (candidates:
@@ -973,10 +973,10 @@ policy e.g. clock-aware gating).
 
 ## Phase Completion Summary
 
-- Objective: Reservation lifecycle transitions — make ACTIVE/COMPLETED usable
+- Objective: Reservation lifecycle transitions â€” make ACTIVE/COMPLETED usable
   through a strict state machine (`start`: RESERVED->ACTIVE, `complete`:
   ACTIVE->COMPLETED).
-- Result: COMPLETE — implemented, tested, verified; not committed.
+- Result: COMPLETE â€” implemented, tested, verified; not committed.
 - Files changed: `src/reservation/reservation.service.ts` (+2 public methods,
   shared `transition()` helper, constants, docs);
   `src/reservation/reservation.controller.ts` (+2 routes with
@@ -1013,7 +1013,7 @@ policy e.g. clock-aware gating).
 
 ## Architecture / Decisions
 
-- **Domain name `Reservation`.** Links `Customer` ↔ `Equipment` within one
+- **Domain name `Reservation`.** Links `Customer` â†” `Equipment` within one
   tenant over a time window.
 - **Status enum `RESERVED | ACTIVE | COMPLETED | CANCELLED`.** RESERVED is the
   create default; ACTIVE/COMPLETED are reachable via the Phase 2H lifecycle
@@ -1024,7 +1024,7 @@ policy e.g. clock-aware gating).
   without double-booking.
 - **Two-layer overlap protection.**
   1. Application pre-check (`findFirst` with overlapping-window predicate,
-     status IN (RESERVED, ACTIVE)) → friendly 409
+     status IN (RESERVED, ACTIVE)) â†’ friendly 409
      `'Equipment is already reserved for the selected period'`.
   2. Authoritative DB-level `EXCLUDE USING gist` constraint (requires
      `btree_gist` extension) on `(equipmentId, tstzrange(startAt AT TIME ZONE
@@ -1033,16 +1033,16 @@ policy e.g. clock-aware gating).
   WHY: the DB constraint makes overlap prevention race-free under concurrent
   inserts; the pre-check provides a friendly error message instead of a raw
   driver error.
-- **DELETE = soft cancel.** Row retained, `status → CANCELLED`; cancelling an
-  already-cancelled reservation → 409 `'Reservation is already cancelled'`.
+- **DELETE = soft cancel.** Row retained, `status â†’ CANCELLED`; cancelling an
+  already-cancelled reservation â†’ 409 `'Reservation is already cancelled'`.
   WHY: freed slots become rebookable (exclusion constraint only covers
   RESERVED/ACTIVE) and history is preserved.
-- **PUT only while RESERVED** → otherwise 409
+- **PUT only while RESERVED** â†’ otherwise 409
   `'Only reservations in RESERVED status can be updated'`.
   `customerId`/`equipmentId` are immutable after creation (omitted from update
   DTO; whitelist validation rejects them with 400).
 - **FK policy:** tenantId CASCADE (tenant cleanup removes reservations);
-  customerId/equipmentId RESTRICT → P2003 mapped to 409
+  customerId/equipmentId RESTRICT â†’ P2003 mapped to 409
   (`'Customer has reservations and cannot be deleted'` /
   `'Asset has reservations and cannot be deleted'`). WHY: prevents orphaning
   reservations while keeping tenant deletion automatic.
@@ -1055,7 +1055,7 @@ policy e.g. clock-aware gating).
   (fail-closed Prisma extension); `tenantId` always derived from
   `TenantContextService` (AsyncLocalStorage), never from client input;
   customer/equipment references resolved through tenant-scoped lookups before
-  any write (foreign refs → 404).
+  any write (foreign refs â†’ 404).
 - **Migration deploy-only discipline:** `prisma migrate dev/diff` would DROP
   the hand-written CHECK/EXCLUDE constraints. Only `prisma migrate deploy`,
   `migrate status`, and manual SQL edits to NEW migration folders are allowed.
@@ -1063,26 +1063,26 @@ policy e.g. clock-aware gating).
 
 ## Execution Plan (Phase 2G)
 
-- [x] Step 1 — Schema: add `ReservationStatus` enum + `Reservation` model +
-      backrefs — completed (`npx prisma validate` passed)
-- [x] Step 2 — Migration SQL created + applied via `npx prisma migrate deploy`
-      + Prisma Client regenerated — completed ("All migrations have been
+- [x] Step 1 â€” Schema: add `ReservationStatus` enum + `Reservation` model +
+      backrefs â€” completed (`npx prisma validate` passed)
+- [x] Step 2 â€” Migration SQL created + applied via `npx prisma migrate deploy`
+      + Prisma Client regenerated â€” completed ("All migrations have been
       successfully applied")
-- [x] Step 3 — Register `'Reservation'` in tenant-scoping extension — completed
-- [x] Step 4 — Permission catalog: RESERVATION_* keys, RESERVATIONS category,
-      definitions, admin/employee defaults — completed
-- [x] Step 5 — DTOs (Create/Update) — completed
-- [x] Step 6 — ReservationService (create/list/findOne/update/softCancel) —
+- [x] Step 3 â€” Register `'Reservation'` in tenant-scoping extension â€” completed
+- [x] Step 4 â€” Permission catalog: RESERVATION_* keys, RESERVATIONS category,
+      definitions, admin/employee defaults â€” completed
+- [x] Step 5 â€” DTOs (Create/Update) â€” completed
+- [x] Step 6 â€” ReservationService (create/list/findOne/update/softCancel) â€”
       completed
-- [x] Step 7 — ReservationController (5 routes) — completed
-- [x] Step 8 — ReservationModule + AppModule registration — completed
-- [x] Step 9 — P2003→409 mapping in customer.service + asset.service — completed
-- [x] Step 10 — Unit specs (dto ~17 tests, service ~30 tests) — completed
+- [x] Step 7 â€” ReservationController (5 routes) â€” completed
+- [x] Step 8 â€” ReservationModule + AppModule registration â€” completed
+- [x] Step 9 â€” P2003â†’409 mapping in customer.service + asset.service â€” completed
+- [x] Step 10 â€” Unit specs (dto ~17 tests, service ~30 tests) â€” completed
       (356/356 passing across 27 suites)
-- [x] Step 11 — Integration spec (~46 tests incl. concurrency) — completed
+- [x] Step 11 â€” Integration spec (~46 tests incl. concurrency) â€” completed
       (321/321 passing across 13 suites)
-- [x] Step 12 — Verification gate: format/lint/build/unit/integration/migrate
-      status/git checks — completed, all green (2 known PRE-EXISTING lint
+- [x] Step 12 â€” Verification gate: format/lint/build/unit/integration/migrate
+      status/git checks â€” completed, all green (2 known PRE-EXISTING lint
       errors remain, out of scope)
 
 ## Historical Phases (preserved)
@@ -1092,21 +1092,21 @@ policy e.g. clock-aware gating).
 > evidence (git status, migrations, source tree, passing test suites). Where a
 > detail was not carried forward, it is marked as such rather than invented.
 
-### Phase 2A–2D (identity, tenancy, RBAC, store/asset/member foundations)
+### Phase 2Aâ€“2D (identity, tenancy, RBAC, store/asset/member foundations)
 
 - Status: COMPLETE (prior sessions; details partially reconstructed)
 - Evidence in workspace:
-  - Migration `20260820004123_identity_multi_tenancy` — identity/multi-tenancy
+  - Migration `20260820004123_identity_multi_tenancy` â€” identity/multi-tenancy
     schema (User, Membership, Role, Permission, RolePermission, Tenant, etc.).
-  - Migration `20260820009000_add_asset_foundation` + `src/asset/` — asset
+  - Migration `20260820009000_add_asset_foundation` + `src/asset/` â€” asset
     foundation domain.
-  - `src/store/` — store domain module.
-  - `src/member/` — member management incl. `dto/create-member.dto.ts` and
+  - `src/store/` â€” store domain module.
+  - `src/member/` â€” member management incl. `dto/create-member.dto.ts` and
     `onboarding.integration.spec.ts`.
-  - `src/rbac/permission-catalog.ts` — PERMISSIONS keys, PERMISSION_DEFINITIONS,
+  - `src/rbac/permission-catalog.ts` â€” PERMISSIONS keys, PERMISSION_DEFINITIONS,
     PERMISSION_CATEGORIES, per-role default grants; seed script
     `scripts/seed-rbac.ts`.
-  - `src/common/database/prisma/tenant-scoping.extension.ts` — fail-closed
+  - `src/common/database/prisma/tenant-scoping.extension.ts` â€” fail-closed
     tenant scoping for models listed in `TENANT_SCOPED_MODELS`;
     `TenantContextService` (AsyncLocalStorage) supplies tenantId.
   - Auth (JWT via passport-jwt, argon2 hashing), tenant-admin, health modules.
@@ -1117,7 +1117,7 @@ policy e.g. clock-aware gating).
   AppModule with supertest against `app.getHttpServer()`; JWTs signed directly
   with `JwtService.signAsync({ sub: userId })`; header `X-Tenant-ID`.
 
-### Phase 2E — Equipment Foundation
+### Phase 2E â€” Equipment Foundation
 
 - Status: COMPLETE (reported complete at end of that session)
 - Files: migration `20260821000000_add_equipment_domain`, `src/equipment/`
@@ -1127,7 +1127,7 @@ policy e.g. clock-aware gating).
   phases. Full session detail was not carried into this file; correctness is
   evidenced by the still-passing `src/equipment/equipment.integration.spec.ts`.
 
-### Phase 2F — Customer Domain Foundation
+### Phase 2F â€” Customer Domain Foundation
 
 - Status: COMPLETE (reported complete at end of that session)
 - Files: migration `20260821010000_add_customer_domain`, `src/customer/`
@@ -1139,7 +1139,7 @@ policy e.g. clock-aware gating).
 
 ---
 
-# Phase 2G — Full Record
+# Phase 2G â€” Full Record
 
 ## Completed Work (Phase 2G)
 
@@ -1149,7 +1149,7 @@ policy e.g. clock-aware gating).
 - What was implemented: `enum ReservationStatus { RESERVED ACTIVE COMPLETED
   CANCELLED }`; `model Reservation` with uuid `id`, `tenantId`, `customerId`,
   `equipmentId`, `startAt`, `endAt` (all `DateTime`), `status` defaulting to
-  RESERVED, optional `notes` (≤1000 chars enforced at DTO layer), `createdAt`/
+  RESERVED, optional `notes` (â‰¤1000 chars enforced at DTO layer), `createdAt`/
   `updatedAt`; relations back to Tenant/Customer/Equipment; `@@index([tenantId])`
   and `@@index([equipmentId, startAt])`.
 - Important behavior: status defaults to RESERVED on create; timestamps stored
@@ -1174,8 +1174,8 @@ policy e.g. clock-aware gating).
   logic; cancelled slots do not block rebooking.
 - Security/tenant implications: none beyond FK cascade policy above.
 - Tests: exercised by every integration overlap/concurrency test.
-- Verification result: `npx prisma migrate deploy` → "All migrations have been
-  successfully applied"; `npx prisma migrate status` → up to date.
+- Verification result: `npx prisma migrate deploy` â†’ "All migrations have been
+  successfully applied"; `npx prisma migrate status` â†’ up to date.
 - WARNING: deploy-only discipline (see Architecture / Decisions).
 
 ### Tenant-scoping registration
@@ -1207,8 +1207,8 @@ policy e.g. clock-aware gating).
 - File: `src/reservation/dto/reservation.dto.ts`
 - Status: COMPLETE
 - What was implemented: `CreateReservationDto` (customerId/equipmentId required
-  uuids, startAt/endAt required `@IsISO8601()`, notes optional ≤1000);
-  `UpdateReservationDto` (startAt?/endAt?/notes? ONLY — no status, no link
+  uuids, startAt/endAt required `@IsISO8601()`, notes optional â‰¤1000);
+  `UpdateReservationDto` (startAt?/endAt?/notes? ONLY â€” no status, no link
   fields).
 - Important behavior: whitelist + forbidNonWhitelisted rejects internal fields
   (id/status/tenantId/userId/etc.) and immutable links on update with 400.
@@ -1220,22 +1220,22 @@ policy e.g. clock-aware gating).
 - File: `src/reservation/reservation.service.ts`
 - Status: COMPLETE
 - What was implemented: `create`, `list` (orderBy createdAt asc), `findOne`,
-  `update`, soft-cancel `remove`; helpers `parseInstant` (strict ISO-8601 →
+  `update`, soft-cancel `remove`; helpers `parseInstant` (strict ISO-8601 â†’
   Date), `assertPositiveRange` (startAt < endAt else 400
   `'startAt must be before endAt'`), `resolveCustomerId`/`resolveEquipmentId`
-  (tenant-scoped `select:{id}` lookups → 404 `'Customer not found'`/
+  (tenant-scoped `select:{id}` lookups â†’ 404 `'Customer not found'`/
   `'Equipment not found'` BEFORE any write), `assertNoOverlap` (pre-check with
   `status:{in:['RESERVED','ACTIVE']}`, `startAt:{lt:endAt}`,
   `endAt:{gt:startAt}`, `id:{not:excludeId}` on update; skipped for notes-only
   updates; partial time updates merged with stored values),
-  `isExclusionViolation` (detects code `23P01` or message match) → same 409.
+  `isExclusionViolation` (detects code `23P01` or message match) â†’ same 409.
 - Important behavior: create returns 201 with projection {id, customerId,
   equipmentId, startAt, endAt (ISO strings), status, notes, createdAt};
   update only while RESERVED; remove sets status=CANCELLED (204), second
-  cancel → 409 `'Reservation is already cancelled'`.
+  cancel â†’ 409 `'Reservation is already cancelled'`.
 - Security/tenant implications: tenantId from TenantContextService only;
-  foreign customer/equipment refs → 404 (no existence leak).
-- Tests: `reservation.service.spec.ts` (~30 tests: CRUD, fail-closed ×5,
+  foreign customer/equipment refs â†’ 404 (no existence leak).
+- Tests: `reservation.service.spec.ts` (~30 tests: CRUD, fail-closed Ã—5,
   context-derived tenantId, scoped ref lookups, foreign refs 404 before write,
   overlap query shape + self-exclusion, 23P01 mapping both shapes,
   NOT_MUTABLE/ALREADY_CANCELLED, projection keys, notes-only skips overlap).
@@ -1247,8 +1247,8 @@ policy e.g. clock-aware gating).
 - Status: COMPLETE
 - What was implemented: routes GET `/reservations`, GET `/reservations/:id`
   (RequirePermission READ), POST/PUT/DELETE `/reservations[/:id]`
-  (RequireAnyPermission(action, MANAGE)); guard chain JwtAuthGuard →
-  TenantGuard → RolesGuard; ValidationPipe whitelist/transform/
+  (RequireAnyPermission(action, MANAGE)); guard chain JwtAuthGuard â†’
+  TenantGuard â†’ RolesGuard; ValidationPipe whitelist/transform/
   forbidNonWhitelisted. Module imports TenantModule + RbacModule only;
   registered in AppModule after CustomerModule.
 - Important behavior: exact error strings surfaced:
@@ -1258,7 +1258,7 @@ policy e.g. clock-aware gating).
 - Tests: integration suite (~46 tests).
 - Verification result: passing.
 
-### P2003 → 409 RESTRICT mapping
+### P2003 â†’ 409 RESTRICT mapping
 - Files: `src/customer/customer.service.ts`, `src/asset/asset.service.ts`
 - Status: COMPLETE
 - What was implemented: wrapped `deleteCustomer` and `deleteAsset` Prisma calls;
@@ -1285,8 +1285,8 @@ policy e.g. clock-aware gating).
   rebook, IDOR (cross-tenant 404), authz matrix (owner semantic-all, employee
   read-only, manager write-only-cannot-read), RESTRICT deletions, suspended/
   inactive-membership gating, exact response projection, concurrency (8
-  parallel identical POSTs → exactly one 201 + seven 409; 4 parallel
-  non-overlapping POSTs → all 201).
+  parallel identical POSTs â†’ exactly one 201 + seven 409; 4 parallel
+  non-overlapping POSTs â†’ all 201).
 - Important behavior: proves both layers of overlap protection and tenant
   isolation end-to-end.
 - Security/tenant implications: IDOR + gating tests assert isolation.
@@ -1314,7 +1314,7 @@ None. Phase 2I is COMPLETE and verified. No task is in progress.
 - Problem: dto spec test expected 400 but got 201.
 - File: `src/reservation/dto/reservation.dto.spec.ts`
 - Error: `expect(res.status).toBe(400)` received 201.
-- Root cause: test data bug — case passed `[START, END]` instead of
+- Root cause: test data bug â€” case passed `[START, END]` instead of
   `[START, START]` for the equal-timestamps scenario.
 - Fix: corrected the case data to `[START, START]`.
 - Verification after fix: unit 356/356 passing.
@@ -1322,7 +1322,7 @@ None. Phase 2I is COMPLETE and verified. No task is in progress.
 ### #2 Lint: self-introduced issues during development
 - Problem: `npm run lint` flagged unused variables/imports in new files.
 - File: `src/reservation/dto/reservation.dto.spec.ts` (unused `_drop`
-  destructuring ×2), `src/reservation/reservation.service.spec.ts` (unused
+  destructuring Ã—2), `src/reservation/reservation.service.spec.ts` (unused
   `UpdateReservationDto` import), `src/reservation/reservation.service.ts`
   (unused `Prisma` import).
 - Error: eslint no-unused-vars.
@@ -1346,7 +1346,7 @@ None. Phase 2I is COMPLETE and verified. No task is in progress.
 - Problem: test expected 409 but the POST succeeded.
 - File: `src/reservation/reservation.integration.spec.ts`
 - Error: expected 409, received 201.
-- Root cause: test-design bug — window `iso(2)-iso(6)` overlapped nothing (the
+- Root cause: test-design bug â€” window `iso(2)-iso(6)` overlapped nothing (the
   baseline reservation sits at `iso(500)-iso(504)`).
 - Fix: changed window to `iso(502)-iso(506)` which overlaps baseline
   `[500,504)` on equipA.
@@ -1367,7 +1367,7 @@ None. Phase 2I is COMPLETE and verified. No task is in progress.
 - Problem: POST expected 201 but returned 404.
 - File: `src/reservation/reservation.integration.spec.ts`
 - Error: expected 201, received 404 ('Equipment not found').
-- Root cause: test referenced `equipBId`, which belongs to TENANT B — a foreign
+- Root cause: test referenced `equipBId`, which belongs to TENANT B â€” a foreign
   equipment reference correctly resolves to 404.
 - Fix: added a second tenant-A fixture asset+equipment
   (`assetA2`/`equipA2Id`, FORKLIFT) in beforeAll; test now uses `equipA2Id`.
@@ -1377,13 +1377,13 @@ None. Phase 2I is COMPLETE and verified. No task is in progress.
 - Problem: PUT extending a reservation expected 409 but succeeded.
 - File: `src/reservation/reservation.integration.spec.ts`
 - Error: expected 409, received 200.
-- Root cause: test-design bug — only ONE reservation existed near the window;
+- Root cause: test-design bug â€” only ONE reservation existed near the window;
   the overlap pre-check excludes self, so extending into empty space succeeded.
 - Fix: create a blocker reservation `[84,88)` first, then PUT near's endAt to
-  `iso(86)` so `[80,86)` overlaps the blocker → 409.
+  `iso(86)` so `[80,86)` overlaps the blocker â†’ 409.
 - Verification after fix: test passes; full suite 321/321.
 
-### Pre-existing failures (NOT introduced by Phase 2G — DO NOT FIX here)
+### Pre-existing failures (NOT introduced by Phase 2G â€” DO NOT FIX here)
 - `npm run lint` reports 2 errors in `src/asset/asset.service.spec.ts`
   (lines 170:9 and 188:11). Pre-existing from an earlier phase; explicitly out
   of scope. Lint exits non-zero because of these, so avoid `if ($?)` chaining
@@ -1395,28 +1395,28 @@ Live state (after Phase 2I gate):
 
 | Check | Status | Result |
 |---|---|---|
-| format | ✅ | `npm run format` applied across src/test |
-| lint | ✅ | clean except 2 PRE-EXISTING errors (asset.service.spec.ts:170,188) |
-| build | ✅ | `npm run build` success |
-| unit | ✅ | 371/371 passing (27 suites) — 2H: 367, 2G: 356, 2F: 308 |
-| integration | ✅ | 336/336 passing (13 suites) — 2H: 332, 2G: 321, 2F: 275 |
-| migrate status | ✅ | "Database schema is up to date!" (5 migrations found) |
-| git diff --check | ✅ | clean (LF→CRLF notices only, no whitespace errors) |
+| format | âœ… | `npm run format` applied across src/test |
+| lint | âœ… | clean except 2 PRE-EXISTING errors (asset.service.spec.ts:170,188) |
+| build | âœ… | `npm run build` success |
+| unit | âœ… | 371/371 passing (27 suites) â€” 2H: 367, 2G: 356, 2F: 308 |
+| integration | âœ… | 336/336 passing (13 suites) â€” 2H: 332, 2G: 321, 2F: 275 |
+| migrate status | âœ… | "Database schema is up to date!" (5 migrations found) |
+| git diff --check | âœ… | clean (LFâ†’CRLF notices only, no whitespace errors) |
 
-Environment note: shell is Windows PowerShell 5.1 — `&&` is unsupported (use
+Environment note: shell is Windows PowerShell 5.1 â€” `&&` is unsupported (use
 `;`), and since lint exits non-zero due to the pre-existing errors, chained
 `if ($?) { ... }` commands silently skip subsequent steps; run build/tests as
 separate commands.
 
 ## Database / Migration State
 
-- Migration files (5 total, oldest → newest):
+- Migration files (5 total, oldest â†’ newest):
   1. `20260820004123_identity_multi_tenancy`
   2. `20260820009000_add_asset_foundation`
   3. `20260821000000_add_equipment_domain`
   4. `20260821010000_add_customer_domain`
-  5. `20260821020000_add_reservation_domain` ← created + applied in Phase 2G
-- Migrations applied: all 5 (`prisma migrate status` → up to date).
+  5. `20260821020000_add_reservation_domain` â† created + applied in Phase 2G
+- Migrations applied: all 5 (`prisma migrate status` â†’ up to date).
 - Prisma Client generation: current (v6.19.3, regenerated after 2G migration).
 - Schema validation: passed (`npx prisma validate`).
 - Existing migrations modified: NO (never modify existing migrations).
@@ -1433,7 +1433,7 @@ Verified via `git status --short` immediately after gate completion:
   - `prisma/schema.prisma`
   - `src/app.module.ts`
   - `src/common/database/prisma/tenant-scoping.extension.ts`
-  - `src/member/member.controller.ts` (predates 2G — earlier phase work)
+  - `src/member/member.controller.ts` (predates 2G â€” earlier phase work)
   - `src/member/member.service.spec.ts` (predates 2G)
   - `src/member/member.service.ts` (predates 2G)
   - `src/rbac/permission-catalog.ts`
@@ -1448,10 +1448,10 @@ Verified via `git status --short` immediately after gate completion:
     `src/member/onboarding.integration.spec.ts`
   - `docs/phase-progress.md` (this file)
 - Staged: none.
-- Commits: none made in recent sessions (entire 2D–2H work is uncommitted).
+- Commits: none made in recent sessions (entire 2Dâ€“2H work is uncommitted).
 - Pushes: none.
 - `.env` touched: NO (never inspected or modified).
-- Workspace-boundary status: respected — all work strictly inside
+- Workspace-boundary status: respected â€” all work strictly inside
   `C:\khanh\python\12\downloads\vibecode\OpenCode\5`.
 
 ## Known Limitations / Deferred Work
@@ -1460,10 +1460,10 @@ Verified via `git status --short` immediately after gate completion:
   `start` requires now >= startAt and `complete` requires now >= endAt
   (409 + dedicated messages otherwise).
 - Integration-spec `afterAll` cleanup uses `deleteMany` OUTSIDE
-  `tenantContext.run()` with a swallowed `.catch(() => undefined)` — silent
+  `tenantContext.run()` with a swallowed `.catch(() => undefined)` â€” silent
   no-op risk if scoping blocks the delete. Pattern replicated across suites
   for consistency per instruction; tenant cascade ultimately cleans rows when
-  tenants are deleted. Deferred by instruction — do not "fix" casually.
+  tenants are deleted. Deferred by instruction â€” do not "fix" casually.
 - ~~`ACTIVE`/`COMPLETED` enum values are currently unreachable~~ RESOLVED in
   Phase 2H (`start`/`complete` endpoints) with clock-aware gating from
   Phase 2I.
@@ -1479,7 +1479,7 @@ Verified via `git status --short` immediately after gate completion:
 NEXT ACTION:
 1. Review the Phase 2J architecture assessment (2J section at the top of this
    file).
-2. Do not modify code/schema/tests — the read-only mandate stands until the
+2. Do not modify code/schema/tests â€” the read-only mandate stands until the
    user explicitly approves implementation.
 3. Upon approval: add the implementation plan to the 2J section, then
    implement in order (utility -> reservation pilot -> other domains ->
@@ -1489,16 +1489,16 @@ NEXT ACTION:
 
 ## Phase Completion Summary
 
-- Objective: Reservation Domain Foundation — tenant-scoped customer↔equipment
+- Objective: Reservation Domain Foundation â€” tenant-scoped customerâ†”equipment
   bookings with UTC half-open windows, two-layer overlap protection, soft
   cancel, RESTRICT-linked lifecycle, RBAC-gated API.
-- Result: COMPLETE — implemented, tested, migrated, fully verified.
+- Result: COMPLETE â€” implemented, tested, migrated, fully verified.
 - Files changed: `prisma/schema.prisma`;
   `prisma/migrations/20260821020000_add_reservation_domain/` (new);
   `src/common/database/prisma/tenant-scoping.extension.ts`;
   `src/rbac/permission-catalog.ts`; `src/app.module.ts`;
   `src/reservation/` (module, controller, service, dto + 3 spec files, new);
-  `src/customer/customer.service.ts` + `src/asset/asset.service.ts` (P2003→409).
+  `src/customer/customer.service.ts` + `src/asset/asset.service.ts` (P2003â†’409).
 - Tests: unit 356/356 (27 suites); integration 321/321 (13 suites; reservation
   suite 46 tests incl. concurrency arbitration).
 - Verification: format/lint/build/unit/integration/migrate status/git diff
@@ -1514,10 +1514,10 @@ NEXT ACTION:
 
 ---
 
-## U1 CATEGORY — COMPLETE (2026-08-21)
+## U1 CATEGORY â€” COMPLETE (2026-08-21)
 
 STATUS: U1 Category = COMPLETE (implemented, verified, documented).
-Phase 3 assessment + D1-D4: APPROVED (see above). Next step: U2 Product —
+Phase 3 assessment + D1-D4: APPROVED (see above). Next step: U2 Product â€”
 NOT started; awaiting explicit user approval.
 
 MIGRATION (exactly one, additive, applied via prisma migrate deploy):
@@ -1561,7 +1561,7 @@ VERIFICATION RESULTS (exact):
   read-only, owner semantic-all, invalid bodies, tenantId injection,
   pagination envelope + cursor chaining asc/desc, invalid cursor 400).
 - npm run format: applied; all files formatted (category files clean).
-- npm run lint: 2 problems total (2 errors, 0 warnings) — BOTH
+- npm run lint: 2 problems total (2 errors, 0 warnings) â€” BOTH
   pre-existing and out of scope: src/asset/service.spec.ts:203 and :221
   (no-unsafe-assignment). Zero new lint issues introduced by U1.
 - npm run build (nest build): success, no errors.
@@ -1582,7 +1582,7 @@ KNOWN LIMITATIONS:
 - Integration fixture note: supertest responses are typed via local
   interfaces + casts (repo pattern) to satisfy the strict lint profile.
 
-NEXT STEP: U2 Product (model + variants + prices skeleton) — PROPOSED,
+NEXT STEP: U2 Product (model + variants + prices skeleton) â€” PROPOSED,
 awaiting explicit approval before any code. Proposed U2 plan follows the
 same checkpoint workflow and reuses every convention validated here
 (tenant-scoped model registration, RBAC keys product:read/create/update/
@@ -1591,10 +1591,10 @@ semantics, BigInt money fields serialized as strings per D-decisions).
 
 ---
 
-## U2 PRODUCT — COMPLETE (2026-08-21)
+## U2 PRODUCT â€” COMPLETE (2026-08-21)
 
 STATUS: U2 Product = COMPLETE (implemented, verified, documented).
-Scope delivered EXACTLY per approved assessment §15 U2 line: schema +
+Scope delivered EXACTLY per approved assessment Â§15 U2 line: schema +
 one additive migration (FK to Category), tenant scoping, product:* RBAC
 keys, CRUD API on existing Commerce conventions, keyset pagination,
 DTO validation/security, unit + integration tests. NO Variant/Price/
@@ -1644,7 +1644,7 @@ FILES CHANGED (11 changed/new):
 - src/category/category.service.ts (ONE additive branch: deleteCategory
   now catches Prisma P2003 from the Product RESTRICT FK and maps it to
   409 'Category is referenced by existing products and cannot be
-  deleted' — implements assessment §9 'P2002/P2003 mapped to clear
+  deleted' â€” implements assessment Â§9 'P2002/P2003 mapped to clear
   409s'; all other CategoryService behavior untouched)
 - Tests (new): src/product/product.dto.spec.ts (16),
   src/product/product.service.spec.ts (21);
@@ -1684,7 +1684,7 @@ VERIFICATION RESULTS (exact, full gate re-run after fix):
   suite exactly; every pre-existing suite unchanged and green).
 - npm run format (prettier --write on touched files): clean afterwards;
   npx prettier --check passes.
-- npm run lint: 2 problems total (2 errors) — BOTH the documented
+- npm run lint: 2 problems total (2 errors) â€” BOTH the documented
   PRE-EXISTING errors src/asset/asset.service.spec.ts:203/:221
   (no-unsafe-assignment). Zero new lint issues from U2.
 - npm run build (nest build): success.
@@ -1696,16 +1696,16 @@ requireTenantId defense-in-depth), server-derived tenant only, no raw
 SQL on tenant-owned data, no generic RolePermission writes, rental
 domains untouched except the single flagged-and-approved-style additive
 P2003 branch in CategoryService.deleteCategory (mirrors the established
-reservation/customer P2003 precedent; required by §9 semantics since
+reservation/customer P2003 precedent; required by Â§9 semantics since
 products now reference categories).
 
 KNOWN LIMITATIONS:
 - No text search on product name/code (out of approved scope, parity
   with other domains).
 - categoryId filter matches nothing for foreign ids (no existence
-  oracle) — intended.
+  oracle) â€” intended.
 - Deleting a PRODUCT is a hard delete; once variants exist (U3) their
-  Cascade FK will remove them with it — revisit if business wants
+  Cascade FK will remove them with it â€” revisit if business wants
   blocking there.
 - CategoryService.deleteCategory P2003 mapping returns 409 for ANY
   restrict violation on Category; today the only restricting child is
@@ -1713,7 +1713,7 @@ KNOWN LIMITATIONS:
 - BigInt/money fields do not exist yet on products (prices arrive U3);
   string serialization convention not exercised by this unit.
 
-NEXT STEP: U3 ProductVariant + Price — PROPOSED ONLY, awaiting explicit
+NEXT STEP: U3 ProductVariant + Price â€” PROPOSED ONLY, awaiting explicit
 user approval before any code. Will reuse every convention validated in
 U1/U2 (tenant-scoped model registration, RBAC five-key pattern + role
 defaults, keyset pagination, PATCH semantics, P2002->409, app-side
@@ -1721,7 +1721,7 @@ parent resolution, whitelist DTOs).
 
 ---
 
-## U3 RESUME — 2026-08-22 (mid-implementation crash recovery)
+## U3 RESUME â€” 2026-08-22 (mid-implementation crash recovery)
 
 Audited at resume (before any new changes this session):
 
@@ -1754,7 +1754,7 @@ service implements list/create/patch/delete + putPrice with BigInt string
 projection, batched price embedding, P2002->409, fail-closed tenant checks;
 two controllers mounted (/products/:id/variants GET|POST and /variants/:id
 PATCH|DELETE + PUT /variants/:id/price) reusing product:* RBAC keys per
-approved §10; module wires both.
+approved Â§10; module wires both.
 
 TESTS: jest.unit.json -> 36 suites 539 tests PASSED (+36 vs U2's 503;
 4 product suites: dto, service, variant-dto, variant-service). jest.
@@ -1768,10 +1768,10 @@ checkpoint and HARD STOP. U4 Inventory NOT started.
 
 ---
 
-## U3 PRODUCTVARIANT + PRICE — COMPLETE (2026-08-22)
+## U3 PRODUCTVARIANT + PRICE â€” COMPLETE (2026-08-22)
 
 STATUS: U3 ProductVariant + Price = COMPLETE (implemented, verified,
-documented). Scope delivered EXACTLY per approved assessment §15 U3 line:
+documented). Scope delivered EXACTLY per approved assessment Â§15 U3 line:
 schema + one additive migration (ProductVariant + Price), tenant scoping,
 RBAC (reuse product:* keys, no new catalog entries), nested/list under
 product + flat manage + price upsert, DTO validation/security, keyset
@@ -1815,12 +1815,12 @@ FILES CHANGED (8 new/changed):
   'A variant with this SKU already exists in the tenant', BigInt->string
   projection, PriceSummary with string amountMinor, putPrice read-then-write
   with P2002 race fallback, deletes hard + cascades)
-- src/product/product-variant.controller.ts (new: two controllers —
+- src/product/product-variant.controller.ts (new: two controllers â€”
   ProductVariantsController on /products/:id/variants GET|POST and
   VariantItemController on /variants/:id PATCH|DELETE + PUT /variants/:id/price;
   PATCH D2, PUT upsert overwrite no history; guard chain JWT->
   TenantResolutionGuard->PermissionsGuard; all routes reuse product:read/
-  create/update/delete/manage keys per §10; whitelist+transform+
+  create/update/delete/manage keys per Â§10; whitelist+transform+
   forbidNonWhitelisted)
 - src/product/product.module.ts (wired both new controllers + ProductVariantService
   alongside existing Product controller/service; no new module)
@@ -1837,7 +1837,7 @@ FILES CHANGED (8 new/changed):
   cascade variant->price + product->variant+price)
 - Fix during VERIFY: src/product/product-variant.service.ts create data
   now includes explicit tenantId (required by Prisma UncheckedCreateInput
-  types; extension also enforces it) — was relying on extension injection
+  types; extension also enforces it) â€” was relying on extension injection
   alone, caused TS2322 build error. Unit mock expectations updated to
   include tenantId. No behavior change (extension already set same value).
 
@@ -1850,7 +1850,7 @@ VERIFICATION RESULTS (exact, full gate re-run after fixes + prettier):
   every pre-existing suite unchanged and green)
 - npm run format (prettier --write on product/**): clean afterwards;
   npx prettier --check passes
-- npm run lint: 2 problems total (2 errors, 0 warnings) — BOTH the
+- npm run lint: 2 problems total (2 errors, 0 warnings) â€” BOTH the
   documented PRE-EXISTING errors src/asset/asset.service.spec.ts:203/:221
   (no-unsafe-assignment). Zero new lint issues after fixes (3 variant
   files had prettier/lint errors fixed: unused import, void handling,
@@ -1864,7 +1864,7 @@ CONVENTIONS PRESERVED: fail-closed tenant scoping (extension +
 requireTenantId defense-in-depth, tested via ProductVariant/Price being
 in TENANT_SCOPED_MODELS), server-derived tenant only, no raw SQL on
 tenant-owned data, no generic RolePermission writes, reuse of product:*
-RBAC (no new permission keys per §10 — variants/prices are product
+RBAC (no new permission keys per Â§10 â€” variants/prices are product
 internals), D2 PATCH for variant updates, PUT for price upsert, no
 Category/Product regression (variant cascade tested, product delete still
 hard + cascades).
@@ -1873,7 +1873,7 @@ KNOWN LIMITATIONS:
 - Variant list has no domain filters beyond parent productId (per approved
   scope; status filter deferred).
 - Price history is NOT kept: PUT overwrites current row (variantId,
-  currency) — order-time snapshots will be added with OrderItem in U6.
+  currency) â€” order-time snapshots will be added with OrderItem in U6.
 - Money amounts fit in Number.MAX_SAFE_INTEGER on input (@Max guard to
   avoid JS precision loss); storage remains exact BIGINT, projection is
   string. Larger amounts would need string-input DTO (deferred).
@@ -1881,20 +1881,20 @@ KNOWN LIMITATIONS:
   model); no RESTRICT protection there.
 - Variant SKU uniqueness is (tenantId, sku) only; no cross-tenant leak.
 
-NEXT STEP: U4 Inventory — PROPOSED ONLY, awaiting explicit user approval
+NEXT STEP: U4 Inventory â€” PROPOSED ONLY, awaiting explicit user approval
 before any code. Will reuse conventions validated in U1-U3 (tenant-scoped
 model, RBAC product/inventory keys, keyset pagination, P2002->409,
 app-side parent resolution, guarded conditional writes, BigInt string
 convention).
 
-HARD STOP — U3 complete; do not start U4 (superseded by U4 below).
+HARD STOP â€” U3 complete; do not start U4 (superseded by U4 below).
 
 ---
 
-## U4 INVENTORY — COMPLETE (2026-08-22)
+## U4 INVENTORY â€” COMPLETE (2026-08-22)
 
 STATUS: U4 Inventory = COMPLETE (implemented, verified, documented). Scope
-delivered EXACTLY per approved §5/§8/§11: single stock pool per variant,
+delivered EXACTLY per approved Â§5/Â§8/Â§11: single stock pool per variant,
 atomic guarded adjustment (no read-modify-write), lazy row (missing ==0),
 DB CHECK >=0, tenant-isolated via variant lookup, RBAC inventory:read/manage,
 endpoints GET /inventory/:variantId and POST /inventory/adjust. NO
@@ -1908,7 +1908,7 @@ MIGRATION (exactly one, additive, applied via manual execute + resolve):
   "createdAt"/"updatedAt" TIMESTAMP(3), CHECK ("quantityOnHand" >=0));
   indexes ("tenantId"), ("tenantId","createdAt","id"); FK ->Tenant CASCADE,
   ->ProductVariant CASCADE. Initial deploy via `prisma migrate deploy` hit
-  BOM/encoding error (0xFEFF) — fixed by rewriting migration.sql without BOM
+  BOM/encoding error (0xFEFF) â€” fixed by rewriting migration.sql without BOM
   (UTF8 no-BOM) and manual `prisma db execute --stdin` + `migrate resolve
   --rolled-back` / `--applied` dance; final `migrate status` up to date
   (11 migrations). `prisma validate` valid; `prisma generate` ok.
@@ -1932,7 +1932,7 @@ FILES CHANGED (9):
 - src/inventory/inventory.controller.ts (new: GET /inventory/:variantId
   @RequirePermission(inventory:read), POST /inventory/adjust
   @RequirePermission(inventory:manage); ValidationPipe whitelist/transform/
-  forbidNonWhitelisted; controller prefix 'inventory' — POST adjust not
+  forbidNonWhitelisted; controller prefix 'inventory' â€” POST adjust not
   shadowed by GET :variantId because methods differ)
 - src/inventory/inventory.module.ts (new), src/app.module.ts (imports
   InventoryModule)
@@ -1957,7 +1957,7 @@ VERIFICATION RESULTS (exact, full gate re-run after prettier/lint fixes):
   pre-existing 16 suites unchanged)
 - npm run format: prettier --write on src/inventory/** then --check passes
   (fixed 76 prettier errors across 4 files in first run)
-- npm run lint: 2 problems total (2 errors, 0 warnings) — BOTH pre-existing
+- npm run lint: 2 problems total (2 errors, 0 warnings) â€” BOTH pre-existing
   src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment); 1 new
   error (unused AdjustInventoryDto import) fixed, then clean
 - npm run build (nest build): success
@@ -1966,12 +1966,12 @@ VERIFICATION RESULTS (exact, full gate re-run after prettier/lint fixes):
 
 CONVENTIONS PRESERVED: fail-closed tenant scoping via variant existence check
 + extension, atomic guarded updateMany never read-modify-write, DB CHECK
-defense in depth, inventory:read/manage RBAC deviation documented (§10),
+defense in depth, inventory:read/manage RBAC deviation documented (Â§10),
 no raw SQL on tenant data (except migration), no nested writes, no
 generic RolePermission, rental FROZEN, product/variant cascade preserved.
 
 KNOWN LIMITATIONS:
-- No list endpoint or pagination for inventory (per §11 — single-row per
+- No list endpoint or pagination for inventory (per Â§11 â€” single-row per
   variant, not a collection).
 - No reservation ledger: available-to-sell == quantityOnHand (decrement-on-order
   semantics deferred to U6 Order, which will reuse adjust()).
@@ -1983,18 +1983,18 @@ KNOWN LIMITATIONS:
 - Variant status (ARCHIVED) does not block adjustments yet (business rule
   deferred to Order validation in U6).
 
-NEXT STEP: U5 Cart — PROPOSED ONLY, awaiting explicit user approval before any
+NEXT STEP: U5 Cart â€” PROPOSED ONLY, awaiting explicit user approval before any
 code. Will reuse inventory adjust API for stock reservation (decrement on
 order, not cart). Will NOT implement Order/Payment yet.
 
-HARD STOP — U4 complete; do not start U5 (superseded by U5 below).
+HARD STOP â€” U4 complete; do not start U5 (superseded by U5 below).
 
 ---
 
-## U5 CART — COMPLETE (2026-08-22)
+## U5 CART â€” COMPLETE (2026-08-22)
 
 STATUS: U5 Cart = COMPLETE (implemented, verified, documented). Scope
-delivered EXACTLY per §6/§11: own open cart per (tenant,user) find-or-create,
+delivered EXACTLY per Â§6/Â§11: own open cart per (tenant,user) find-or-create,
 items merge by @@unique([cartId,variantId]), live totals from current Price
 rows (BigInt strings per currency, mixed currencies allowed in cart), no
 stock reservation, discard own OPEN cart. NO Order/Payment/POS/Booking/rental
@@ -2021,7 +2021,7 @@ FILES CHANGED (8):
   ProductVariant.cartItems + Tenant.carts/cartItems + User.carts)
 - prisma/migrations/20260821090000_add_cart/migration.sql (new)
 - src/rbac/permission-catalog.ts (CART_MANAGE, category 'cart',
-  ADMIN += cart:manage, EMPLOYEE += cart:manage per §10 employee defaults)
+  ADMIN += cart:manage, EMPLOYEE += cart:manage per Â§10 employee defaults)
 - src/common/database/prisma/tenant-scoping.extension.ts ('Cart','CartItem'
   in TENANT_SCOPED_MODELS)
 - src/cart/dto/cart.dto.ts (new: AddCartItemDto variantId + quantity @IsInt
@@ -2060,7 +2060,7 @@ VERIFICATION RESULTS (exact, full gate re-run after prettier/lint fixes):
   (was 453 post-U4; +15 cart integration exactly; pre-existing 17 suites
   unchanged)
 - npm run format: prettier --write on src/cart/** ok, check passes
-- npm run lint: 2 problems total (2 errors, 0 warnings) — BOTH pre-existing
+- npm run lint: 2 problems total (2 errors, 0 warnings) â€” BOTH pre-existing
   src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment); 3 cart
   files had unused-import errors fixed, then clean
 - npm run build (nest build): success
@@ -2072,7 +2072,7 @@ for Cart/CartItem, owner-scoped self-service via server-derived userId
 (CurrentUser), atomic merge with P2002 retry, live Price BigInt string
 totals per currency, tenant isolation per X-Tenant-ID, ownership isolation
 within same tenant (item.cartId ownership check), cart:manage RBAC deviation
-documented (§10), no stock reservation, no raw SQL, rental FROZEN, product/
+documented (Â§10), no stock reservation, no raw SQL, rental FROZEN, product/
 variant cascade preserved (CartItem -> ProductVariant CASCADE).
 
 KNOWN LIMITATIONS:
@@ -2087,8 +2087,123 @@ KNOWN LIMITATIONS:
 - No quantity availability check against inventory at cart time (stock check
   deferred to Order creation guarded updateMany).
 
-NEXT STEP: U6 Order + OrderItem — PROPOSED ONLY, awaiting explicit user approval
+NEXT STEP: U6 Order + OrderItem â€” PROPOSED ONLY, awaiting explicit user approval
 before any code. Will handle cart checkout vs direct items, snapshots, T1/T3
 transactions, concurrency/rollback. Will NOT implement Payment yet.
 
-HARD STOP — U5 complete; do not start U6.
+HARD STOP â€” U5 complete; do not start U6.
+
+
+---
+
+## U6 ORDER + ORDERITEM â€” COMPLETE (2026-08-29)
+
+STATUS: U6 Order + OrderItem = COMPLETE (implemented, verified, documented).
+Scope delivered EXACTLY per approved assessment Â§15 U6 line: schema + one additive
+migration (Order + OrderItem), tenant scoping, RBAC order:* keys, direct-items
+OR cart checkout, snapshots, T1/T3 transactions, state machine, concurrency/
+rollback tests, gate. NO Payment/POS/Booking/rental work. HARD STOP: U7 NOT
+started; awaiting explicit user approval.
+
+MIGRATION (exactly one, additive, applied via prisma migrate deploy):
+- 20260821100000_add_order
+  CREATE TYPE "OrderStatus" AS ENUM ('PENDING','PAID','CANCELLED');
+  CREATE TABLE "Order" (id TEXT PK cuid, "tenantId" TEXT NOT NULL,
+  "userId" TEXT NOT NULL, "customerId" TEXT NULL, status "OrderStatus" NOT NULL
+  DEFAULT 'PENDING', "currency" CHAR(3) NOT NULL, "subtotalMinor" BIGINT NOT NULL,
+  "cancelledAt" TIMESTAMP(3), "createdAt"/"updatedAt" TIMESTAMP(3),
+  CHECK ("subtotalMinor" >= 0));
+  CREATE TABLE "OrderItem" (id TEXT PK cuid, "tenantId" TEXT NOT NULL,
+  "orderId" TEXT NOT NULL, "variantId" TEXT NOT NULL, "productName" TEXT NOT NULL,
+  "variantName" TEXT, "sku" TEXT NOT NULL, "quantity" INTEGER NOT NULL,
+  "currency" CHAR(3) NOT NULL, "unitAmountMinor" BIGINT NOT NULL,
+  "lineTotalMinor" BIGINT NOT NULL, "createdAt"/"updatedAt" TIMESTAMP(3),
+  CHECK ("quantity" > 0), CHECK ("unitAmountMinor" >= 0),
+  CHECK ("lineTotalMinor" >= 0), CHECK ("lineTotalMinor" = "quantity" * "unitAmountMinor"));
+  UNIQUE indexes and FKs: Order.tenantId->Tenant CASCADE, Order.userId->User CASCADE,
+  Order.customerId->Customer RESTRICT, OrderItem.orderId->Order CASCADE,
+  OrderItem.variantId->ProductVariant RESTRICT, OrderItem.tenantId->Tenant CASCADE.
+  Indexes for keyset pagination: (tenantId), (tenantId,createdAt,id), (tenantId,status),
+  (customerId) on Order; (tenantId), (orderId), (variantId) on OrderItem.
+  No existing objects modified. `migrate status` 13/13 up to date; `validate` valid.
+
+FILES CHANGED (13):
+- prisma/schema.prisma (Order/OrderItem models + relations on Tenant/User/Customer/ProductVariant)
+- prisma/migrations/20260821100000_add_order/migration.sql (new, handwritten SQL with CHECK constraints)
+- src/common/database/prisma/tenant-scoping.extension.ts ('Order','OrderItem' in TENANT_SCOPED_MODELS)
+- src/rbac/permission-catalog.ts (ORDER_READ/CREATE/DELETE/MANAGE, category 'orders', admin+=manage, employee+=read+create)
+- src/customer/customer.service.ts (additive P2003 branch for Order.customerId RESTRICT -> 409 'Customer has orders...')
+- src/order/dto/order.dto.ts (CreateOrderDto: items optional for cart checkout, customerId optional; OrderListQueryDto with status filter)
+- src/order/order.service.ts (createOrder: T1 transaction - validate variants ACTIVE + prices uniform currency + guarded stock decrement + create Order + top-level OrderItems + mark cart CONVERTED; getOrder; listOrders keyset pagination; cancelOrder: T3 - guarded PENDING->CANCELLED + restock increments per variant)
+- src/order/order.controller.ts (POST /orders (order:create), GET /orders (order:read), GET /orders/:id (order:read), POST /orders/:id/cancel (order:delete) with @HttpCode(200); guard chain JWT->TenantResolutionGuard->PermissionsGuard)
+- src/order/order.module.ts (new), src/app.module.ts (OrderModule import)
+- Tests (new): src/order/dto/order.dto.spec.ts (6), src/order/order.service.spec.ts (12), src/order/order.integration.spec.ts (56)
+
+VERIFICATION RESULTS (exact, full gate re-run):
+- Unit suite (jest.unit.json): 42 suites passed, 592 tests passed
+  (was 577 post-U5; +15 order dto/service specs).
+- Integration suite (jest.integration.json): 19 suites passed, 524 tests passed
+  (was 468 post-U5; +56 order integration exactly; every pre-existing suite unchanged and green).
+- npm run format: prettier --write on src/order/** then --check passes.
+- npm run lint: 2 problems total (2 errors) â€” BOTH pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment).
+  Zero new lint issues introduced by U6.
+- npm run build (nest build): success.
+- npx prisma validate: valid.
+- npx prisma migrate status: Database schema is up to date! (13 migrations).
+- npx prisma generate: v6.19.3.
+
+CONVENTIONS PRESERVED: fail-closed tenant scoping (extension + requireTenantId), server-derived tenant only, no raw SQL on tenant-owned data, no nested writes (OrderItems created top-level), no generic RolePermission writes, rental FROZEN, Product/Variant/Customer cascade/RESTRICT preserved. BigInt money serialized as strings. PATCH on new domains (no UPDATE on Order). Status never client-writable. Atomic guarded inventory decrement via InventoryService pattern reused inside T1/T3 transactions. Concurrency: parallel last-unit orders -> exactly one 201 (mirrors U4/Reservation). Transaction rollback: forced price/stock failure leaves stock untouched. Cart ownership: checkout marks OPEN->CONVERTED, subsequent checkout fails 400. Customer delete blocked by Order RESTRICT FK (additive P2003 branch, approved D1). Order status machine: PENDING->PAID|cancel->CANCELLED, PAID terminal, cancel PAID = 409. Snapshots: productName/variantName/sku/unitAmountMinor/currency frozen at creation; later Price/Variant edits don't affect history.
+
+KNOWN LIMITATIONS:
+- Order list has no userId filter (tenant-scoped reads per assessment; ownership isolation is Cart-only).
+- Payment capture/fail endpoints not yet implemented (U7).
+- No refund/fulfillment flows (deferred to later phases).
+- Currency mix rejected at checkout (409); multi-currency carts allowed but not convertible.
+- customerId optional on Order; if provided, same-tenant validated (404 if foreign).
+
+NEXT STEP: U7 Payment â€” PROPOSED ONLY, awaiting explicit user approval before any code.
+Will implement Payment model + T2/T5 transactions, full-amount invariant, idempotent
+terminal states, Payment-Order state machine coupling. Will NOT implement POS/Booking.
+
+HARD STOP â€” U6 complete; do not start U7.
+
+
+---
+
+## U7 PAYMENT â€” CP1 SCHEMA + MIGRATION COMPLETE (2026-08-29)
+
+STATUS: U7 CP1 = COMPLETE (implemented, verified, documented).
+Scope delivered EXACTLY per approved U7 assessment CP1: PaymentStatus enum,
+Payment model, relations, indexes, CHECK constraint, one additive migration.
+
+MIGRATION (exactly one, additive, applied via prisma migrate deploy):
+- 20260821110000_add_payment
+  CREATE TYPE "PaymentStatus" AS ENUM ('PROCESSING','CAPTURED','FAILED');
+  CREATE TABLE "Payment" (id TEXT PK cuid, "tenantId" TEXT NOT NULL,
+  "orderId" TEXT NOT NULL, status "PaymentStatus" NOT NULL DEFAULT 'PROCESSING',
+  "method" TEXT NOT NULL, "amountMinor" BIGINT NOT NULL, "currency" CHAR(3) NOT NULL,
+  "createdAt"/"updatedAt" TIMESTAMP(3), CHECK ("amountMinor" >= 0));
+  Indexes: (tenantId), (tenantId,createdAt,id), (orderId);
+  FK: tenantId->Tenant CASCADE, orderId->Order CASCADE.
+  No existing objects modified. `migrate status` 14/14 up to date; `validate` valid.
+
+FILES CHANGED (2):
+- prisma/schema.prisma (PaymentStatus enum, Payment model + relations on Tenant/Order)
+- prisma/migrations/20260821110000_add_payment/migration.sql (new, handwritten SQL)
+
+VERIFICATION RESULTS (exact):
+- npx prisma validate: valid.
+- npx prisma migrate deploy: applied (14 migrations).
+- npx prisma generate: v6.19.3.
+- npx prisma migrate status: Database schema is up to date! (14 migrations).
+
+DEVIATIONS FROM ASSESSMENT:
+- CHECK constraint (amountMinor >= 0) only in handwritten migration SQL, not Prisma schema
+  (Prisma does not support CHECK in schema DSL). Consistent with Inventory/OrderItem pattern.
+
+NEXT CHECKPOINT: CP2 â€” Tenant Scoping + RBAC
+Add 'Payment' to TENANT_SCOPED_MODELS; add PAYMENT_READ/CREATE/MANAGE permissions,
+PAYMENTS category, definitions, admin/employee role defaults.
+
+HARD STOP â€” U7 CP1 complete; do not start CP2 without explicit approval.
