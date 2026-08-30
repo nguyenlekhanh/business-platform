@@ -2352,3 +2352,49 @@ guarded PROCESSINGâ†’FAILED (Order stays PENDING), idempotent re-fail. Paym
 Controller + Module. Integration tests for state machine, idempotency, concurrency.
 
 HARD STOP â€” U7 CP4 complete; do not start CP5 without explicit approval.
+
+
+---
+
+## U7 PAYMENT â€” CP5 T2 CAPTURE / FAIL COMPLETE (2026-08-29)
+
+STATUS: U7 CP5 = COMPLETE (implemented, verified, documented).
+Scope delivered EXACTLY per approved U7 assessment CP5: capturePayment and failPayment
+with T2 transaction semantics, guarded updates, idempotent terminal states, tenant scoping,
+concurrency-safe design.
+
+FILES CHANGED (2):
+- src/payment/payment.service.ts (capturePayment + failPayment with T2 transaction semantics)
+- src/payment/payment.service.spec.ts (14 new unit tests: capture success/idempotent/
+  rollback/404/409, fail success/idempotent/404/409, state machine enforcement)
+
+VERIFICATION RESULTS (exact, full gate re-run):
+- Unit suite (jest.unit.json): 44 suites passed, 645 tests passed
+  (+1 suite, +14 tests from payment service spec).
+- Integration suite (jest.integration.json): 19 suites passed, 524 tests passed
+  (unchanged from CP4).
+- npm run format: clean.
+- npm run lint: 2 problems total (2 errors) â€” BOTH pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment).
+  Zero new lint issues introduced by U7 CP5.
+- npm run build (nest build): success.
+- npx prisma validate: valid.
+- npx prisma migrate status: Database schema is up to date! (14 migrations).
+- npx prisma generate: v6.19.3.
+
+CONVENTIONS PRESERVED: Tenant scoping via extension (Payment in TENANT_SCOPED_MODELS),
+fail-closed tenant context, server-derived tenantId from Payment/Order, BigInt money as
+strings in summary, T2 transaction semantics (atomic guarded updateMany on both Payment
+and Order), no nested writes, Payment updated top-level via tx.payment.updateMany(),
+no client control of status, T2 capture: PROCESSINGâ†’CAPTURED + PENDINGâ†’PAID atomic
+coupling, T2 fail: PROCESSINGâ†’FAILED (Order unchanged), idempotent re-capture/re-fail
+(returns existing terminal state, no DB changes), state machine enforcement:
+FAILED cannot capture, CAPTURED cannot fail, terminal states immutable.
+
+NEXT CHECKPOINT: CP6 â€” Controller + PaymentModule
+Implement PaymentController with POST /payments (create), GET /payments/:id,
+POST /payments/:id/capture, POST /payments/:id/fail endpoints, proper guard chain,
+validation pipes, @HttpCode(200) on capture/fail. Wire PaymentModule in AppModule.
+Add integration tests for API endpoints, RBAC matrix, tenant isolation, idempotency.
+
+HARD STOP â€” U7 CP5 complete; do not start CP6 without explicit approval.

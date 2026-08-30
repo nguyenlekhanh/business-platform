@@ -13,22 +13,38 @@ describe('PaymentService', () => {
   let tenantContext: TenantContextService;
 
   const mockOrderFindUnique = jest.fn();
+  const mockOrderUpdateMany = jest.fn();
   const mockPaymentFindFirst = jest.fn();
+  const mockPaymentFindUnique = jest.fn();
   const mockPaymentCreate = jest.fn();
+  const mockPaymentUpdateMany = jest.fn();
 
   interface MockTx {
-    order: { findUnique: typeof mockOrderFindUnique };
+    order: {
+      findUnique: typeof mockOrderFindUnique;
+      updateMany: typeof mockOrderUpdateMany;
+    };
     payment: {
       findFirst: typeof mockPaymentFindFirst;
+      findUnique: typeof mockPaymentFindUnique;
       create: typeof mockPaymentCreate;
+      updateMany: typeof mockPaymentUpdateMany;
     };
   }
 
   const mockTransaction = jest.fn(
     async (cb: (tx: MockTx) => Promise<PaymentSummary>) => {
       const tx: MockTx = {
-        order: { findUnique: mockOrderFindUnique },
-        payment: { findFirst: mockPaymentFindFirst, create: mockPaymentCreate },
+        order: {
+          findUnique: mockOrderFindUnique,
+          updateMany: mockOrderUpdateMany,
+        },
+        payment: {
+          findFirst: mockPaymentFindFirst,
+          findUnique: mockPaymentFindUnique,
+          create: mockPaymentCreate,
+          updateMany: mockPaymentUpdateMany,
+        },
       };
       return cb(tx);
     },
@@ -70,10 +86,15 @@ describe('PaymentService', () => {
         {
           provide: PrismaService,
           useValue: {
-            order: { findUnique: mockOrderFindUnique },
+            order: {
+              findUnique: mockOrderFindUnique,
+              updateMany: mockOrderUpdateMany,
+            },
             payment: {
               findFirst: mockPaymentFindFirst,
+              findUnique: mockPaymentFindUnique,
               create: mockPaymentCreate,
+              updateMany: mockPaymentUpdateMany,
             },
             $transaction: mockTransaction,
           },
@@ -153,7 +174,6 @@ describe('PaymentService', () => {
 
     it('allows creation if existing payment is PROCESSING (not CAPTURED)', async () => {
       mockOrderFindUnique.mockResolvedValue(order());
-      // findFirst for CAPTURED should return null (no captured payment)
       mockPaymentFindFirst.mockResolvedValue(null);
       mockPaymentCreate.mockResolvedValue(payment());
 
@@ -165,7 +185,6 @@ describe('PaymentService', () => {
 
     it('allows creation if existing payment is FAILED (not CAPTURED)', async () => {
       mockOrderFindUnique.mockResolvedValue(order());
-      // findFirst for CAPTURED should return null (no captured payment)
       mockPaymentFindFirst.mockResolvedValue(null);
       mockPaymentCreate.mockResolvedValue(payment());
 
@@ -178,7 +197,6 @@ describe('PaymentService', () => {
     it('derives amountMinor from order, ignores any client-provided amount', async () => {
       mockOrderFindUnique.mockResolvedValue(order({ subtotalMinor: 5000n }));
       mockPaymentFindFirst.mockResolvedValue(null);
-
       mockPaymentCreate.mockResolvedValue(payment({ amountMinor: 5000n }));
 
       const result = await runInTenant(() =>
@@ -196,7 +214,6 @@ describe('PaymentService', () => {
     it('derives currency from order, ignores any client-provided currency', async () => {
       mockOrderFindUnique.mockResolvedValue(order({ currency: 'EUR' }));
       mockPaymentFindFirst.mockResolvedValue(null);
-
       mockPaymentCreate.mockResolvedValue(payment({ currency: 'EUR' }));
 
       const result = await runInTenant(() =>
@@ -232,7 +249,6 @@ describe('PaymentService', () => {
     it('sets tenantId from order (not from client)', async () => {
       mockOrderFindUnique.mockResolvedValue(order());
       mockPaymentFindFirst.mockResolvedValue(null);
-
       mockPaymentCreate.mockResolvedValue(payment());
 
       await runInTenant(() =>
@@ -249,13 +265,157 @@ describe('PaymentService', () => {
     it('uses method from DTO', async () => {
       mockOrderFindUnique.mockResolvedValue(order());
       mockPaymentFindFirst.mockResolvedValue(null);
-
       mockPaymentCreate.mockResolvedValue(payment({ method: 'CASH' }));
 
       const result = await runInTenant(() =>
         service.createPayment({ orderId: 'order-1', method: 'CASH' }),
       );
       expect(result.method).toBe('CASH');
+    });
+  });
+
+  describe('capturePayment', () => {
+    it('captures PROCESSING payment and marks Order PAID', async () => {
+      mockPaymentFindUnique
+        .mockResolvedValueOnce(payment())
+        .mockResolvedValueOnce(payment({ status: 'CAPTURED' }));
+      mockPaymentUpdateMany.mockResolvedValue({ count: 1 });
+      mockOrderUpdateMany.mockResolvedValue({ count: 1 });
+
+      const result = await runInTenant(() =>
+        service.capturePayment('payment-1'),
+      );
+      expect(result.status).toBe('CAPTURED');
+      expect(mockPaymentUpdateMany).toHaveBeenCalledWith({
+        where: { id: 'payment-1', status: 'PROCESSING' },
+        data: { status: 'CAPTURED' },
+      });
+      expect(mockOrderUpdateMany).toHaveBeenCalledWith({
+        where: { id: 'order-1', status: 'PENDING' },
+        data: { status: 'PAID' },
+      });
+    });
+
+    it('returns existing CAPTURED payment idempotently', async () => {
+      mockPaymentFindUnique.mockResolvedValue(payment({ status: 'CAPTURED' }));
+
+      const result = await runInTenant(() =>
+        service.capturePayment('payment-1'),
+      );
+      expect(result.status).toBe('CAPTURED');
+      expect(mockPaymentUpdateMany).not.toHaveBeenCalled();
+      expect(mockOrderUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects FAILED payment', async () => {
+      mockPaymentFindUnique.mockResolvedValue(payment({ status: 'FAILED' }));
+
+      await expect(
+        runInTenant(() => service.capturePayment('payment-1')),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('rejects non-PROCESSING payment', async () => {
+      mockPaymentFindUnique.mockResolvedValue(payment({ status: 'UNKNOWN' }));
+
+      await expect(
+        runInTenant(() => service.capturePayment('payment-1')),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('throws NotFound for unknown payment', async () => {
+      mockPaymentFindUnique.mockResolvedValue(null);
+
+      await expect(
+        runInTenant(() => service.capturePayment('nope')),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('throws Conflict if Payment update count is 0', async () => {
+      mockPaymentFindUnique.mockResolvedValue(payment());
+      mockPaymentUpdateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        runInTenant(() => service.capturePayment('payment-1')),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('throws Conflict if Order update count is 0', async () => {
+      mockPaymentFindUnique.mockResolvedValue(payment());
+      mockPaymentUpdateMany.mockResolvedValue({ count: 1 });
+      mockOrderUpdateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        runInTenant(() => service.capturePayment('payment-1')),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('rolls back if Order update fails', async () => {
+      mockPaymentFindUnique.mockResolvedValue(payment());
+      mockPaymentUpdateMany.mockResolvedValue({ count: 1 });
+      mockOrderUpdateMany.mockRejectedValue(new Error('DB error'));
+
+      await expect(
+        runInTenant(() => service.capturePayment('payment-1')),
+      ).rejects.toThrow();
+    });
+  });
+
+  describe('failPayment', () => {
+    it('fails PROCESSING payment, Order remains PENDING', async () => {
+      mockPaymentFindUnique
+        .mockResolvedValueOnce(payment())
+        .mockResolvedValueOnce(payment({ status: 'FAILED' }));
+      mockPaymentUpdateMany.mockResolvedValue({ count: 1 });
+
+      const result = await runInTenant(() => service.failPayment('payment-1'));
+      expect(result.status).toBe('FAILED');
+      expect(mockPaymentUpdateMany).toHaveBeenCalledWith({
+        where: { id: 'payment-1', status: 'PROCESSING' },
+        data: { status: 'FAILED' },
+      });
+      expect(mockOrderUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('returns existing FAILED payment idempotently', async () => {
+      mockPaymentFindUnique.mockResolvedValue(payment({ status: 'FAILED' }));
+
+      const result = await runInTenant(() => service.failPayment('payment-1'));
+      expect(result.status).toBe('FAILED');
+      expect(mockPaymentUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects CAPTURED payment', async () => {
+      mockPaymentFindUnique.mockResolvedValue(payment({ status: 'CAPTURED' }));
+
+      await expect(
+        runInTenant(() => service.failPayment('payment-1')),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('rejects non-PROCESSING payment', async () => {
+      mockPaymentFindUnique.mockResolvedValue(payment({ status: 'UNKNOWN' }));
+
+      await expect(
+        runInTenant(() => service.failPayment('payment-1')),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('throws NotFound for unknown payment', async () => {
+      mockPaymentFindUnique.mockResolvedValue(null);
+
+      await expect(
+        runInTenant(() => service.failPayment('nope')),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('throws Conflict if Payment update count is 0', async () => {
+      mockPaymentFindUnique.mockResolvedValue(payment());
+      mockPaymentUpdateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        runInTenant(() => service.failPayment('payment-1')),
+      ).rejects.toBeInstanceOf(ConflictException);
     });
   });
 });
