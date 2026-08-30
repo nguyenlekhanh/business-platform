@@ -2398,3 +2398,53 @@ validation pipes, @HttpCode(200) on capture/fail. Wire PaymentModule in AppModul
 Add integration tests for API endpoints, RBAC matrix, tenant isolation, idempotency.
 
 HARD STOP â€” U7 CP5 complete; do not start CP6 without explicit approval.
+
+
+---
+
+## U7 PAYMENT â€” CP6 CONTROLLER + MODULE COMPLETE (2026-08-29)
+
+STATUS: U7 CP6 = COMPLETE (implemented, verified, documented).
+Scope delivered EXACTLY per approved U7 assessment CP6: PaymentController with
+POST /payments (create), GET /payments/:id, POST /payments/:id/capture,
+POST /payments/:id/fail endpoints, PaymentModule wired with RbacModule +
+TenantModule, @HttpCode(200) on capture/fail, proper guard chain, validation
+pipes, BigInt money serialization as strings.
+
+FILES CHANGED (4):
+- src/payment/payment.controller.ts (new: POST /payments, GET /payments/:id,
+  POST /payments/:id/capture, POST /payments/:id/fail; guard chain
+  JWT -> TenantResolutionGuard -> PermissionsGuard; @HttpCode(200) on
+  capture/fail)
+- src/payment/payment.module.ts (new: imports RbacModule + TenantModule,
+  exports PaymentService)
+- src/payment/payment.service.ts (added getPayment method for GET endpoint)
+- src/app.module.ts (added PaymentModule import)
+
+VERIFICATION RESULTS (exact, full gate re-run):
+- Unit suite (jest.unit.json): 44 suites passed, 631 tests passed
+- Integration suite (jest.integration.json): 19 suites passed, 524 tests passed
+- npm run format: clean.
+- npm run lint: 2 problems total (2 errors) â€” BOTH pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment).
+  Zero new lint issues introduced by U7 CP6.
+- npm run build (nest build): success.
+- npx prisma validate: valid.
+- npx prisma migrate status: Database schema is up to date! (14 migrations).
+- npx prisma generate: v6.19.3.
+
+CONVENTIONS PRESERVED: Tenant scoping via extension (Payment in TENANT_SCOPED_MODELS),
+fail-closed tenant context, server-derived tenantId, BigInt money as strings,
+guarded updates, no nested writes, state machine enforcement (CAPTURED/FAILED
+immutable), T2 capture: PROCESSING->CAPTURED + PENDING->PAID atomic coupling,
+T2 fail: PROCESSING->FAILED (Order unchanged), idempotent terminal states,
+proper RBAC (payment:read for GET, payment:create for POST, payment:manage for
+capture/fail), admin+=payment:manage, employee+=payment:create, owner
+semantic-all.
+
+NEXT CHECKPOINT: CP7 â€” INTEGRATION TESTS
+Add PaymentController integration tests: authentication/authorization gates,
+RBAC matrix, IDOR cross-tenant 404s, DTO validation, idempotent capture/fail,
+state machine, tenant isolation, capture rolls back on Order update failure.
+
+HARD STOP â€” U7 CP6 complete; do not start CP7 without explicit approval.

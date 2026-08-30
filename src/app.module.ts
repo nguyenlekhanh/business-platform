@@ -11,6 +11,7 @@ import { HealthModule } from './health/health.module';
 import { AssetModule } from './asset/asset.module';
 import { CartModule } from './cart/cart.module';
 import { OrderModule } from './order/order.module';
+import { PaymentModule } from './payment/payment.module';
 import { CategoryModule } from './category/category.module';
 import { CustomerModule } from './customer/customer.module';
 import { InventoryModule } from './inventory/inventory.module';
@@ -51,6 +52,7 @@ import { validateEnv } from './common/config/env.validation';
     InventoryModule,
     CartModule,
     OrderModule,
+    PaymentModule,
   ],
   providers: [
     {

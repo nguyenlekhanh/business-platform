@@ -68,6 +68,15 @@ export class PaymentService {
     });
   }
 
+  async getPayment(paymentId: string): Promise<PaymentSummary> {
+    this.assertTenantContext();
+    const payment = await this.prisma.payment.findUnique({
+      where: { id: paymentId },
+    });
+    if (!payment) throw new NotFoundException(PAYMENT_NOT_FOUND);
+    return this.toSummary(payment);
+  }
+
   async capturePayment(paymentId: string): Promise<PaymentSummary> {
     this.assertTenantContext();
 
