@@ -2302,3 +2302,53 @@ payment exists, create PROCESSING row with amount/currency from Order,
 return PaymentSummary.
 
 HARD STOP â€” U7 CP3 complete; do not start CP4 without explicit approval.
+
+
+---
+
+## U7 PAYMENT â€” CP4 T5 CREATE PAYMENT COMPLETE (2026-08-29)
+
+STATUS: U7 CP4 = COMPLETE (implemented, verified, documented).
+Scope delivered EXACTLY per approved U7 assessment CP4: PaymentService.createPayment
+with T5 transaction semantics, full-amount and currency invariants, tenant scoping,
+T5 duplicate protection (no CAPTURED payment exists), 404 for missing/foreign orders,
+409 for non-PENDING orders or existing CAPTURED payment.
+
+FILES CREATED (2):
+- src/payment/payment.service.ts (createPayment: validates Order PENDING + no
+  CAPTURED payment exists, creates PROCESSING row with amountMinor/currency from
+  Order, returns PaymentSummary)
+- src/payment/payment.service.spec.ts (12 unit tests: success, missing/foreign
+  order 404, non-PENDING rejection, CAPTURED rejection, amount/currency derived
+  from Order, full-amount invariant, PROCESSING status, tenantId from Order)
+
+VERIFICATION RESULTS (exact, full gate re-run):
+- Unit suite (jest.unit.json): 44 suites passed, 617 tests passed
+  (+1 suite, +12 tests from payment service spec).
+- Integration suite (jest.integration.json): 19 suites passed, 524 tests passed
+  (unchanged from CP3).
+- npm run format: clean.
+- npm run lint: 2 problems total (2 errors) â€” BOTH pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment).
+  Zero new lint issues introduced by U7 CP4.
+- npm run build (nest build): success.
+- npx prisma validate: valid.
+- npx prisma migrate status: Database schema is up to date! (14 migrations).
+- npx prisma generate: v6.19.3.
+
+CONVENTIONS PRESERVED: Tenant scoping via extension (Payment in TENANT_SCOPED_MODELS),
+fail-closed tenant context, server-derived tenantId from Order (not client), BigInt
+money as strings in summary, T5 transaction semantics (guarded Order PENDING check +
+CAPTURED count check + top-level Payment create), no nested writes, Payment
+created top-level via tx.payment.create(), no client control of amount/currency/
+status/tenantId, full-amount invariant (Payment.amountMinor === Order.subtotalMinor),
+currency invariant (Payment.currency === Order.currency), T5 duplicate protection
+(CAPTURED payment check).
+
+NEXT CHECKPOINT: CP5 â€” T2 Capture / Fail
+Implement capturePayment(id): guarded PROCESSINGâ†’CAPTURED + Order PENDINGâ†’PAID
+in single transaction, idempotent re-capture. Implement failPayment(id):
+guarded PROCESSINGâ†’FAILED (Order stays PENDING), idempotent re-fail. Payment
+Controller + Module. Integration tests for state machine, idempotency, concurrency.
+
+HARD STOP â€” U7 CP4 complete; do not start CP5 without explicit approval.
