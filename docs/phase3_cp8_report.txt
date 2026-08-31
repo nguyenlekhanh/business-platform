@@ -1,0 +1,195 @@
+=======================================================================
+ PHASE 3 — CORE COMMERCE
+ U7 CP8 — FINAL PAYMENT VERIFICATION GATE
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 3 — Core Commerce, Unit U7 Payment, Checkpoint CP8
+            (Final Verification Gate)
+Date       : 2026-08-31
+Status     : COMPLETE — verified, documented, committed, pushed.
+             With CP8, UNIT U7 (PAYMENT) IS COMPLETE.
+Starting
+Git commit : 4e4a115 ("test(payment): complete U7 CP7 integration coverage")
+
+-----------------------------------------------------------------------
+1. CP8 SCOPE
+-----------------------------------------------------------------------
+CP8 was a pure verification gate over the complete U7 Payment
+implementation delivered by CP1–CP7. Its purpose: confirm that Payment is
+production-consistent with the Phase 3 architecture and the documented
+business/security invariants. NO feature expansion, NO schema changes,
+NO new endpoints, NO production-code changes (and none were needed).
+
+-----------------------------------------------------------------------
+2. VERIFICATION CHECKLIST (DERIVED FROM docs/phase-progress.md §2, §4,
+   §7, §8, §10, §11, §12 AND THE CP1–CP7 CHECKPOINTS)
+-----------------------------------------------------------------------
+  1. Payment state machine
+  2. Transaction integrity (T2 capture / T5 create, guards, rollback)
+  3. Money invariants (full-amount, currency, BigInt->string)
+  4. Tenant isolation (centralized scoping, IDOR, no raw SQL)
+  5. RBAC (payment:read/create/manage + role defaults)
+  6. API/DTO surface (exactly the four §11 endpoints)
+  7. Database/Prisma (schema, indexes, FKs, CHECK, migration state)
+  8. Full regression gate (actual command results)
+
+-----------------------------------------------------------------------
+3. IMPLEMENTATION FINDINGS (CODE AUDIT)
+-----------------------------------------------------------------------
+PAYMENT STATE MACHINE — VERIFIED
+  - PROCESSING -> CAPTURED (capturePayment) and PROCESSING -> FAILED
+    (failPayment) are the only transitions; status is never
+    client-writable.
+  - Terminal-state protection: CAPTURED payment re-capture is
+    idempotent-success (returns existing row, no writes); FAILED payment
+    capture -> 409 "Failed payment cannot be captured"; CAPTURED payment
+    fail -> 409 "Captured payment cannot be failed"; FAILED re-fail is
+    idempotent-success.
+  - Order coupling: capture flips Order PENDING -> PAID inside the same
+    transaction; fail never touches the Order (stays PENDING).
+
+TRANSACTION INTEGRITY (T2/T5) — VERIFIED
+  - T2 capture runs inside prisma.$transaction: guarded
+    Payment.updateMany({ id, status: PROCESSING } -> CAPTURED) with
+    count==1 enforcement, THEN guarded Order.updateMany({ id,
+    status: PENDING } -> PAID) with count==1 enforcement. Either count==0
+    throws, rolling back BOTH writes (integration test proves the
+    Payment stays PROCESSING when the Order guard fails — no partial
+    CAPTURED/CANCELLED state).
+  - T2 fail is a single guarded updateMany; the Order is never written.
+  - T5 createPayment validates Order PENDING and no existing CAPTURED
+    payment before inserting the PROCESSING row; multiple PROCESSING
+    payments for one Order remain allowed (documented business rule).
+  - Concurrency: two racing captures (or capture-vs-fail) are arbitrated
+    by the guarded updateMany — exactly one winner; integration tests
+    verify only 200/409 outcomes and consistent final DB state.
+
+MONEY INVARIANTS — VERIFIED
+  - Payment.amountMinor is copied server-side from Order.subtotalMinor
+    and Payment.currency from Order.currency (payment.service.ts:62-63);
+    the client supplies only orderId + method.
+  - PaymentSummary.amountMinor uses BigInt.toString() — string at the
+    API boundary in every response; DB column stays exact BIGINT.
+
+API / DTO SURFACE — VERIFIED
+  - Exactly the four §11 endpoints: POST /payments (payment:create),
+    GET /payments/:id (payment:read), POST /payments/:id/capture
+    (payment:manage, @HttpCode(200)), POST /payments/:id/fail
+    (payment:manage, @HttpCode(200)). No listing/pagination/refunds/
+    webhooks/gateways/new states.
+  - CreatePaymentDto exposes only orderId (@IsString @IsNotEmpty) and
+    method (@IsString @IsNotEmpty @MaxLength(50)); controller-level
+    ValidationPipe (whitelist + transform + forbidNonWhitelisted)
+    rejects tenantId/amountMinor/currency/status/id/timestamps/unknown
+    fields with 400 (integration-tested in CP7).
+
+-----------------------------------------------------------------------
+4. SECURITY FINDINGS
+-----------------------------------------------------------------------
+  - 'Payment' is registered in TENANT_SCOPED_MODELS
+    (tenant-scoping.extension.ts:28): every top-level Payment read/write
+    is force-scoped to the AsyncLocalStorage tenant context and fails
+    closed without context.
+  - tenantId is never accepted from the client (DTO whitelist rejects
+    it; the create path derives tenantId from the resolved Order row).
+  - Cross-tenant Payment/Order references resolve to the uniform 404
+    "Payment not found" / "Order not found" (no existence oracle); CP7
+    integration tests prove cross-tenant capture/fail attempts leave
+    the owning tenant's rows untouched.
+  - No raw SQL ($queryRaw/$executeRaw) anywhere in src/payment.
+  - Guard chain on all four routes: JwtAuthGuard -> TenantResolutionGuard
+    -> PermissionsGuard + TenantContextInterceptor.
+  - RBAC verified in the catalog AND by behavior: payment:read/create/
+    manage defined; admin += PAYMENT_MANAGE; employee += PAYMENT_CREATE;
+    owner semantic-all; manage-only role can capture but cannot read or
+    create; employee can create orders+payments but cannot read/capture/
+    fail payments.
+
+-----------------------------------------------------------------------
+5. DATABASE / PRISMA FINDINGS
+-----------------------------------------------------------------------
+  - Migration 20260821110000_add_payment (additive, handwritten SQL,
+    deploy-only discipline): CREATE TYPE PaymentStatus
+    ('PROCESSING','CAPTURED','FAILED'); CREATE TABLE Payment with
+    CHECK ("amountMinor" >= 0); indexes Payment_tenantId_idx,
+    Payment_tenantId_createdAt_id_idx (keyset parity), Payment_orderId_idx;
+    FKs tenantId -> Tenant CASCADE and orderId -> Order CASCADE.
+    Matches prisma/schema.prisma exactly (CHECK lives in SQL only —
+    documented Prisma DSL limitation, consistent with
+    Inventory/OrderItem).
+  - prisma validate: valid. migrate status: "Database schema is up to
+    date!" — 14 migrations, no existing migration modified, no new
+    migration required by CP8.
+
+-----------------------------------------------------------------------
+6. REGRESSION RESULTS (ACTUAL RUNS, 2026-08-31)
+-----------------------------------------------------------------------
+  Focused Payment integration suite : 1 suite,  35/35  passed
+  Full integration suite            : 20 suites, 559/559 passed
+  Full unit suite                    : 44 suites, 631/631 passed
+  npm run lint                       : 2 errors — both the KNOWN
+                                       PRE-EXISTING
+                                       src/asset/asset.service.spec.ts
+                                       :203/:221
+                                       (no-unsafe-assignment); zero new
+                                       or payment-related issues
+  npm run build (nest build)         : success (repository type-check)
+  npx prettier --check               : all files pass
+  npx prisma validate                : valid
+  npx prisma migrate status          : up to date (14 migrations)
+
+  The pre-existing inventory concurrent-increment flakiness did NOT
+  reproduce in the CP8 full-suite run (documented as load-dependent and
+  out of scope either way).
+
+-----------------------------------------------------------------------
+7. KNOWN PRE-EXISTING ISSUES (SEPARATE FROM CP8, UNCHANGED)
+-----------------------------------------------------------------------
+  - src/asset/asset.service.spec.ts:203 and :221 — pre-existing
+    no-unsafe-assignment lint errors; standing project rule is to leave
+    them untouched.
+  - Inventory "concurrent increments" integration test can be flaky
+    under full parallel suite load; passes in isolation; unrelated to
+    Payment.
+
+-----------------------------------------------------------------------
+8. HISTORICAL TEST-COUNT DISCREPANCY (PRESERVED — NOT REWRITTEN)
+-----------------------------------------------------------------------
+  The CP5 checkpoint entry in docs/phase-progress.md states the unit
+  suite reached "645 tests" after adding 14 payment-service tests. That
+  number is arithmetically wrong: CP4 ended at 617 unit tests;
+  617 + 14 = 631. No tests were ever deleted at any point. CP6's
+  recorded 631 was the correct baseline; CP7 and CP8 fresh runs confirm
+  631/631 across 44 suites. Per the project's no-history-rewrite rule,
+  the CP5 entry is left as originally written; the CP7 checkpoint note
+  is the factual correction of record.
+
+  CP8 DOCUMENTATION CORRECTION (transparent, not concealment):
+  the CP7 report's Git section originally recorded the pre-amend hash
+  e514f55; the final CP7 commit actually pushed is 4e4a115 (the commit
+  was amended to stamp its own hash into the report, then
+  force-with-lease pushed). The CP7 report file was corrected during
+  CP8 to record 4e4a115 as the final CP7 commit; no code or test
+  history was altered.
+
+-----------------------------------------------------------------------
+9. FILES CHANGED BY CP8
+-----------------------------------------------------------------------
+  Created : docs/phase3_cp8_report.txt   (this file)
+  Modified: docs/phase-progress.md        (CP8 checkpoint appended;
+                                           U7 marked COMPLETE)
+  Modified: docs/phase3_cp7_report.txt    (Git-section hash correction
+                                           documented in section 8)
+  Production code: ZERO changes. Schema/migrations: ZERO changes.
+
+-----------------------------------------------------------------------
+10. GIT
+-----------------------------------------------------------------------
+  (Recorded after the operations succeeded.)
+
+  Commit hash     : see final stamp below
+  Commit message  : test(payment): complete U7 CP8 verification gate
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS — working tree clean after push

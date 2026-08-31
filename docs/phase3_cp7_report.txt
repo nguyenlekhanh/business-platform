@@ -249,9 +249,14 @@ count remains 631.
 (Recorded only after the operations succeeded — see below for the
 final values stamped at commit time.)
 
-  Commit hash     : e514f55
+  Commit hash     : e514f55 (pre-amend) — final pushed commit is 4e4a115
+                    (the commit was amended to stamp the hash into this
+                    report, then force-with-lease pushed). Corrected during
+                    the CP8 verification gate; see
+                    docs/phase3_cp8_report.txt section 8.
   Commit message  : test(payment): complete U7 CP7 integration coverage
   Branch          : main
   Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
-  Push result     : SUCCESS — c6a556b..e514f55 main -> main;
-                    working tree clean after push.
+  Push result    : SUCCESS — c6a556b..4e4a115 main -> main (force-with-lease
+                    after the documented amend); working tree clean after
+                    push.

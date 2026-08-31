@@ -2559,3 +2559,93 @@ user approval.
 
 HARD STOP â€” U7 CP7 complete; do not start CP8 without explicit approval.
 
+---
+
+## U7 PAYMENT â€” CP8 FINAL VERIFICATION GATE COMPLETE (2026-08-31)
+
+STATUS: U7 CP8 = COMPLETE (verified, documented). **U7 PAYMENT = COMPLETE.**
+CP8 was a pure verification gate: ZERO production-code, schema, or migration
+changes. The CP1â€“CP6 implementation was re-audited against the Phase 3
+assessment (Â§2/Â§4/Â§5/Â§7/Â§8/Â§10/Â§11/Â§12) and the full regression gate was
+re-run with actual results below.
+
+CP8 VERIFICATION CHECKLIST (all verified against actual code/DB):
+1. Payment state machine: PROCESSING->CAPTURED | PROCESSING->FAILED only;
+   terminal states immutable (FAILED_CANNOT_CAPTURE / CAPTURED_CANNOT_FAIL
+   guards); capture flips Order PENDING->PAID; fail leaves Order PENDING;
+   idempotent re-capture/re-fail return existing terminal state (200).
+2. Transaction integrity (T2/T5): interactive $transaction; both capture
+   updates are guarded updateMany with count==1 enforcement â€” Payment
+   PROCESSING->CAPTURED then Order PENDING->PAID; any count==0 aborts and
+   rolls back BOTH (integration test proves Payment stays PROCESSING when
+   the Order guard fails). Fail is a single guarded update; Order never
+   touched. Duplicate T5 creation blocked when a CAPTURED payment exists;
+   multiple PROCESSING payments allowed (documented rule).
+3. Money invariants: Payment.amountMinor === Order.subtotalMinor and
+   Payment.currency === Order.currency (derived server-side from the Order
+   row, never client-supplied); amountMinor serialized via BigInt.toString()
+   in every PaymentSummary (string at the API boundary, exact BIGINT in DB).
+4. Tenant isolation: 'Payment' registered in TENANT_SCOPED_MODELS
+   (tenant-scoping.extension.ts:28); tenantId from AsyncLocalStorage context
+   only; client-supplied tenantId rejected with 400 (whitelist); cross-tenant
+   Payment/Order references resolve to uniform 404 (no existence oracle);
+   no raw SQL anywhere in src/payment.
+5. RBAC: payment:read|create|manage in catalog; PERMISSION_DEFINITIONS has
+   all three; admin += PAYMENT_MANAGE, employee += PAYMENT_CREATE, owner
+   semantic-all (verified in permission-catalog.ts and by CP7 integration
+   tests: manage-only can capture but not read/create; employee can create
+   but not read/capture/fail).
+6. API/DTO surface: exactly the four Â§11 endpoints (POST /payments,
+   GET /payments/:id, POST /payments/:id/capture with @HttpCode(200),
+   POST /payments/:id/fail with @HttpCode(200)); CreatePaymentDto exposes
+   only orderId+method; whitelist+transform+forbidNonWhitelisted rejects
+   tenantId/amountMinor/currency/status/id/timestamps/unknown fields.
+   NO refunds, webhooks, gateways, listing, pagination, or new states.
+7. Database/Prisma: migration 20260821110000_add_payment (additive only)
+   creates PaymentStatus enum, Payment table with CHECK amountMinor>=0,
+   indexes [tenantId],[tenantId,createdAt,id],[orderId], FKs tenantId->Tenant
+   CASCADE + orderId->Order CASCADE; matches schema.prisma; prisma validate
+   valid; migrate status up to date (14 migrations); existing migrations
+   untouched.
+
+CP8 REGRESSION RESULTS (exact, actual runs, 2026-08-31):
+- Focused Payment integration suite: 1 suite, 35/35 passed.
+- Full integration suite (jest.integration.json): 20 suites, 559/559 passed
+  (inventory concurrent-increment flakiness did NOT reproduce this run).
+- Full unit suite (jest.unit.json): 44 suites, 631/631 passed.
+- npm run lint: 2 problems â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment). Zero new
+  issues. Zero payment-related issues.
+- npm run build (nest build): success.
+- npx prettier --check: all files pass.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (14 migrations).
+
+CP8 FINDINGS (no defects; one documentation correction):
+- The CP7 report (docs/phase3_cp7_report.txt) Git section recorded the
+  pre-amend commit hash e514f55; the final CP7 commit actually pushed is
+  4e4a115 (amended to stamp the hash into the report, then force-with-lease
+  pushed). Corrected in the report during CP8 and documented here; no code
+  or test history was altered.
+- No production defects found. No transaction guards weakened. No approved
+  business rule changed.
+
+HISTORICAL TEST-COUNT DISCREPANCY (preserved, unchanged from CP7 record):
+- CP5's checkpoint entry incorrectly documented "645 tests"; the arithmetic
+  truth is 631 (617 + 14). No tests were ever deleted. CP6's 631 was the
+  correct baseline; CP7/CP8 fresh runs confirm 631 unit tests / 44 suites.
+  The CP5 entry remains as originally written per the no-history-rewrite
+  rule; the CP7 note is the factual correction of record.
+
+KNOWN PRE-EXISTING ISSUES (unchanged, out of scope):
+- src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+- Inventory concurrent-increment integration test flakiness under full
+  parallel suite load (passes in isolation; did not reproduce in CP8's run).
+
+NEXT UNIT: U8 â€” Cross-domain verification (customer-delete-with-orders 409,
+end-to-end flow test category->product->variant->price->stock->cart->order->
+pay->cancel-restock), full gate. NOT started; awaiting explicit user approval.
+
+HARD STOP â€” U7 (Payment) COMPLETE via CP8; do not start U8 without explicit
+approval.
+
