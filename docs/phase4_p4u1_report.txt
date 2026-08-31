@@ -1,0 +1,285 @@
+=======================================================================
+ PHASE 4 — POS + OFFLINE SYNC
+ P4-U1 — POS FOUNDATION
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 4, Unit 1 (POS Foundation)
+Date       : 2026-08-31
+Status     : COMPLETE — implemented, verified, documented, committed,
+             pushed. HARD STOP before P4-U2.
+Starting
+Git commit : 2e2b80a ("docs(phase3): complete final verification gate")
+Governing
+documents  : docs/phase4_discovery_report.txt (§16: approved D1–D10),
+             docs/phase4_p4u1_plan.txt (approved plan + A1–A6)
+
+-----------------------------------------------------------------------
+1. IMPLEMENTATION SCOPE
+-----------------------------------------------------------------------
+P4-U1 delivered the POS foundation exactly as approved — device and
+session identity ONLY. Deliberately NOT included (later units):
+POS sale flow (P4-U2), multi-store inventory (P4-U3), offline operation
+model (P4-U4), sync protocol (P4-U5), offline payment boundary (P4-U6).
+
+-----------------------------------------------------------------------
+2. APPROVED DECISIONS IMPLEMENTED (A1–A6, from the plan)
+-----------------------------------------------------------------------
+A1 PERMISSIONS: exactly pos:read | pos:create | pos:manage (no
+   pos:register). Role defaults: owner semantic-all; admin += all three;
+   employee += pos:read ONLY. pos:create = register device + open
+   session; pos:manage = suspend/resume/retire, rotate credential,
+   close session; pos:read = list/get.
+A2 DEVICE CREDENTIAL: server-issued 384-bit random secret
+   (crypto.randomBytes(48) -> base64url), stored ONLY as sha256 hex
+   (PosDevice.credentialHash, UNIQUE), returned in plaintext EXACTLY
+   ONCE in the register/rotate-credential responses, never in any
+   list/read endpoint, never logged. verifyCredential() provides
+   constant-time (timingSafeEqual) digest comparison for the future
+   X-POS-Device-Credential sync header (P4-U5; not implemented here).
+A3 SESSION CLOSE: bare OPEN -> CLOSED lifecycle; no financial summary
+   fields in P4-U1.
+A4 REGISTRATION AUTHORITY: pos:create only — owner/admin allowed,
+   employee/cashier NOT allowed (employee default is pos:read only).
+A5 STORE BINDING: permanent. storeId is not patchable (whitelist 400);
+   moving a terminal = retire + re-register. Sessions inherit the
+   DEVICE's store; client-supplied storeId is rejected with 400.
+A6 DEVICE LIFECYCLE: ACTIVE <-> SUSPENDED; ACTIVE|SUSPENDED -> RETIRED
+   (terminal). RETIRED is checked FIRST for every action (all
+   transitions + rotation on a retired device -> 409 'Device is already
+   retired'). No hard-delete endpoint; no transition out of RETIRED.
+
+-----------------------------------------------------------------------
+3. ARCHITECTURE
+-----------------------------------------------------------------------
+New module src/pos/ (mirrors the Phase 3 module conventions):
+  - PosDeviceService: registration (store resolved via tenant-scoped
+    lookup, foreign/unknown -> 404 'Store not found', the Asset.storeId
+    precedent), keyset-paginated list with status filter, get, rename
+    (PATCH), guarded lifecycle transitions, guarded credential rotation,
+    constant-time verifyCredential.
+  - PosSessionService: open (device must be ACTIVE; store derived from
+    the device; cashier = authenticated principal; one-open-per-device
+    enforced), get, guarded close (re-close -> 409).
+  - PosController: full guard chain JwtAuthGuard -> TenantResolutionGuard
+    -> PermissionsGuard + TenantContextInterceptor + whitelist/transform/
+    forbidNonWhitelisted ValidationPipe (PaymentController pattern).
+  - PosModule: imports TenantModule + RbacModule; exports both services.
+
+Reused established patterns: credential hashing (RefreshToken sha256),
+guarded updateMany transitions (Payment T2), P2002 -> 409 mapping,
+keyset pagination module, app-side same-tenant reference resolution.
+
+-----------------------------------------------------------------------
+4. SCHEMA (as implemented)
+-----------------------------------------------------------------------
+enum PosDeviceStatus { ACTIVE SUSPENDED RETIRED }
+enum PosSessionStatus { OPEN CLOSED }
+
+PosDevice: id cuid, tenantId, storeId (Store, RESTRICT), name
+  (UNIQUE(tenantId,name)), status (default ACTIVE), credentialHash
+  (UNIQUE, sha256 hex), lastSeenAt? (for P4-U5 sync), timestamps;
+  indexes [tenantId], [tenantId,createdAt,id] (keyset parity), [storeId].
+
+PosSession: id cuid, tenantId, deviceId (PosDevice, CASCADE), storeId
+  (denormalized from device, Store RESTRICT), userId (cashier, User
+  CASCADE), status (default OPEN), openedAt, closedAt?, timestamps;
+  indexes [tenantId], [tenantId,createdAt,id], [deviceId,status],
+  [userId]. CHECK (closedAt IS NULL OR closedAt >= openedAt).
+
+Database-only constraints (handwritten SQL):
+  - PARTIAL UNIQUE INDEX PosSession_one_open_per_device ON
+    PosSession(deviceId) WHERE status = 'OPEN' — the DB arbitrates the
+    dual-open race (deliberately stricter than the tolerated U5 cart
+    race; a terminal is single-cashier-at-a-time).
+  - Store delete is RESTRICTed while devices/sessions reference it
+    (Category/Product P2003 precedent — verified in integration tests).
+
+Tenant scoping: 'PosDevice','PosSession' added to TENANT_SCOPED_MODELS
+(15 tenant-scoped models). tenantId always server-derived from the
+AsyncLocalStorage context; fail-closed; uniform cross-tenant 404.
+
+-----------------------------------------------------------------------
+5. MIGRATION
+-----------------------------------------------------------------------
+ONE additive handwritten-SQL migration, applied via
+`npx prisma migrate deploy`:
+
+  20260821120000_add_pos_foundation
+    - CREATE TYPE PosDeviceStatus / PosSessionStatus
+    - CREATE TABLE PosDevice (incl. UNIQUE (tenantId,name),
+      UNIQUE credentialHash, CHECK-free device table)
+    - CREATE TABLE PosSession (incl. CHECK closedAt >= openedAt)
+    - Standard + keyset indexes on both tables
+    - PARTIAL UNIQUE INDEX one_open_per_device
+    - FKs: tenant CASCADE (both), store RESTRICT (both),
+      device CASCADE (session), user CASCADE (session)
+
+No existing objects modified. Existing 14 migrations untouched.
+Final: 15 migrations, `prisma migrate status` = up to date.
+
+-----------------------------------------------------------------------
+6. API SURFACE
+-----------------------------------------------------------------------
+POST   /pos/devices                    pos:create  201 {device + credential}
+GET    /pos/devices                    pos:read    200 {data,meta.nextCursor} (status filter)
+GET    /pos/devices/:id                pos:read    200 DeviceSummary (never credential fields)
+PATCH  /pos/devices/:id                pos:manage  200 (name only; storeId/status -> 400)
+POST   /pos/devices/:id/suspend        pos:manage  200 ACTIVE->SUSPENDED
+POST   /pos/devices/:id/resume         pos:manage  200 SUSPENDED->ACTIVE
+POST   /pos/devices/:id/retire         pos:manage  200 *->RETIRED (terminal)
+POST   /pos/devices/:id/rotate-credential pos:manage 200 {device + NEW credential}
+POST   /pos/sessions                   pos:create  201 SessionSummary
+GET    /pos/sessions/:id               pos:read    200 SessionSummary
+POST   /pos/sessions/:id/close         pos:manage  200 OPEN->CLOSED
+
+Error semantics: unknown/foreign ids -> uniform 404 ('Pos device not
+found' / 'POS session not found' / 'Store not found'); state-machine
+violations -> 409 ('Device is not active' / 'Device is not suspended' /
+'Device is already retired' / 'Device already has an open session' /
+'Only open sessions can be closed'); duplicate name -> 409; whitelist
+violations -> 400.
+
+-----------------------------------------------------------------------
+7. SECURITY MODEL (VERIFIED BY TESTS)
+-----------------------------------------------------------------------
+  - Tenant isolation: both models centralized-scoped; cross-tenant
+    GET/PATCH/suspend/retire/rotate/session-open/session-close all
+    return uniform 404 and leave the owning tenant's rows untouched
+    (direct DB verification); ambient-context direct Prisma reads
+    return null under the foreign tenant.
+  - Credential security: plaintext appears exactly once; the stored row
+    equals sha256(credential) and never the plaintext; no read/list
+    endpoint exposes credential or credentialHash; rotation replaces
+    the hash atomically and is guarded against concurrent retire.
+  - IDOR/injection: tenantId, status, credential(Hash), id, timestamps,
+    unknown fields -> 400 on create; storeId/userId on session open ->
+    400 (store comes from the device); PATCH storeId/status -> 400.
+  - RBAC: A1 matrix behavior-verified — employee (pos:read only) reads
+    but gets 403 on register/retire/open/close; create-only member can
+    register + open but not read/manage; owner semantic-all walks the
+    full lifecycle with zero grants.
+
+-----------------------------------------------------------------------
+8. LIFECYCLE & CONCURRENCY BEHAVIOR (TESTED)
+-----------------------------------------------------------------------
+  - A6 matrix verified end-to-end: suspend -> resume -> retire; every
+    invalid edge -> its documented 409; RETIRED rejects suspend/resume/
+    retire/rotation with 'Device is already retired'.
+  - Suspended devices cannot open sessions (409 'Device is not
+    active'); resume restores opening.
+  - Session close is guarded; re-close -> 409; closedAt set; CHECK
+    closedAt >= openedAt enforced at the DB.
+  - DETERMINISTIC RACES (real HTTP, no mocks/sleeps):
+      * two concurrent session opens on one device -> exactly
+        [201, 409] ('Device already has an open session'), exactly one
+        OPEN row — the partial unique index arbitrates;
+      * two concurrent retires on one device -> exactly [200, 409] —
+        the guarded updateMany arbitrates; final row RETIRED.
+
+-----------------------------------------------------------------------
+9. TESTS
+-----------------------------------------------------------------------
+Unit (jest.unit.json):
+  - src/pos/dto/pos.dto.spec.ts (17): valid/invalid payloads; whitelist
+    rejection of tenantId/status/credential(Hash)/id/timestamps/storeId
+    (session)/userId (session)/unknown fields; A5 storeId-not-patchable;
+    status-not-patchable; MaxLength bounds.
+  - src/pos/pos-device.service.spec.ts (19): fail-closed; registration
+    credential security (hash-only persistence via real sha256, secret
+    exactly once, distinct per registration); store 404; P2002 -> 409
+    (real PrismaClientKnownRequestError mocks); full transition matrix
+    incl. RETIRED-first semantics; rotation (hash replacement + retired
+    forbidden + concurrent-retire race); constant-time verifyCredential;
+    keyset list composition.
+  - src/pos/pos-session.service.spec.ts (11): fail-closed; store derived
+    from device; device 404/SUSPENDED/RETIRED rejections; P2002 race
+    fallback; guarded close; re-close 409; unknown 404.
+
+Integration (jest.integration.json):
+  - src/pos/pos.integration.spec.ts (22): full authn/RBAC/lifecycle/
+    credential/tenant-isolation/concurrency/pagination matrix as
+    described in sections 7-8.
+
+-----------------------------------------------------------------------
+10. VERIFICATION RESULTS (ACTUAL RUNS, 2026-08-31)
+-----------------------------------------------------------------------
+  Focused POS unit suites        : 3 suites,  47/47  passed
+  Focused POS integration suite  : 1 suite,  22/22  passed
+  Full unit suite                : 47 suites, 678/678 passed
+                                   (Phase 3 baseline 44/631; +3 suites,
+                                   +47 tests exactly)
+  Full integration suite         : 22 suites, 590/590 passed
+                                   (post-U8 baseline 21/568; +1 suite,
+                                   +22 tests exactly; every pre-existing
+                                   suite unchanged and green)
+  npm run lint                   : 2 errors — both the KNOWN
+                                   PRE-EXISTING asset.service.spec.ts
+                                   :203/:221 (no-unsafe-assignment);
+                                   zero new issues from P4-U1
+  npm run build (type-check)     : success
+  npx prettier --check           : all files pass
+  npx prisma validate            : valid
+  npx prisma migrate status      : up to date (15 migrations)
+
+-----------------------------------------------------------------------
+11. KNOWN ISSUES
+-----------------------------------------------------------------------
+PRE-EXISTING (separate from P4-U1; untouched):
+  - src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+  - Inventory concurrent-increment flakiness under parallel load (did
+    NOT reproduce in this run).
+
+P4-U1 DEFECTS: none. Two test-side corrections were made during the
+gate (documented in phase-progress): real PrismaClientKnownRequestError
+mocks required for type-guards; lifecycle RETIRED-first message
+refinement (guards and 409 behavior unchanged).
+
+-----------------------------------------------------------------------
+12. PHASE 3 COMPATIBILITY
+-----------------------------------------------------------------------
+ZERO Phase 3 behavior changes: no Order/Payment/Cart/Inventory/money/
+tenant-isolation/RBAC-semantics modifications; Store/User/Tenant gained
+only additive backrelations; the existing permission keys and role
+defaults are untouched (only additive POS keys + additive grants); the
+existing 14 migrations are untouched; rental residue untouched.
+
+-----------------------------------------------------------------------
+13. FILES CHANGED
+-----------------------------------------------------------------------
+Created:
+  prisma/migrations/20260821120000_add_pos_foundation/migration.sql
+  src/pos/dto/pos.dto.ts, src/pos/dto/pos.dto.spec.ts
+  src/pos/pos-device.service.ts, src/pos/pos-device.service.spec.ts
+  src/pos/pos-session.service.ts, src/pos/pos-session.service.spec.ts
+  src/pos/pos.controller.ts, src/pos/pos.module.ts
+  src/pos/pos.integration.spec.ts
+  docs/phase4_p4u1_report.txt (this file)
+Modified:
+  prisma/schema.prisma
+  src/common/database/prisma/tenant-scoping.extension.ts
+  src/rbac/permission-catalog.ts
+  src/app.module.ts
+  docs/phase-progress.md
+(Planning documents docs/phase4_discovery_report.txt and
+ docs/phase4_p4u1_plan.txt — created earlier during the planning gate —
+ are committed together with this unit.)
+
+-----------------------------------------------------------------------
+14. GIT
+-----------------------------------------------------------------------
+(Recorded after the operations succeeded.)
+
+  Commit message  : feat(pos): implement P4-U1 POS foundation
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS — working tree clean after push
+
+=======================================================================
+FINAL BOUNDARY
+=======================================================================
+  P4-U1 COMPLETE -> DOCUMENTED -> COMMITTED -> PUSHED -> HARD STOP.
+  DO NOT start P4-U2 (Online POS Sale), P4-U3+ (inventory, offline,
+  sync), Phase 5+, refunds, webhooks, or external providers. Each
+  requires separate explicit approval.
+=======================================================================

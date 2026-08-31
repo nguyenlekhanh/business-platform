@@ -54,6 +54,9 @@ export const PERMISSIONS = {
   PAYMENT_READ: 'payment:read',
   PAYMENT_CREATE: 'payment:create',
   PAYMENT_MANAGE: 'payment:manage',
+  POS_READ: 'pos:read',
+  POS_CREATE: 'pos:create',
+  POS_MANAGE: 'pos:manage',
   ROLE_READ: 'role:read',
   ROLE_MANAGE: 'role:manage',
   SETTINGS_READ: 'settings:read',
@@ -75,6 +78,7 @@ export const PERMISSION_CATEGORIES = {
   CART: 'cart',
   ORDERS: 'orders',
   PAYMENTS: 'payments',
+  POS: 'pos',
   MEMBERS: 'members',
   RBAC: 'rbac',
   SETTINGS: 'settings',
@@ -360,6 +364,26 @@ export const PERMISSION_DEFINITIONS: readonly PermissionDefinition[] = [
     description: 'Full payment management in the tenant (capture/fail)',
   },
   {
+    key: PERMISSIONS.POS_READ,
+    name: 'Read POS devices and sessions',
+    category: PERMISSION_CATEGORIES.POS,
+    description: 'View POS devices and sessions in the tenant',
+  },
+  {
+    key: PERMISSIONS.POS_CREATE,
+    name: 'Register POS devices and open sessions',
+    category: PERMISSION_CATEGORIES.POS,
+    description:
+      'Register POS devices and open POS sessions in the tenant (A1: admin-level authority; employees are read-only)',
+  },
+  {
+    key: PERMISSIONS.POS_MANAGE,
+    name: 'Manage POS devices and sessions',
+    category: PERMISSION_CATEGORIES.POS,
+    description:
+      'Suspend/resume/retire POS devices, rotate device credentials, and close POS sessions in the tenant',
+  },
+  {
     key: PERMISSIONS.MEMBER_READ,
     name: 'Read members',
     category: PERMISSION_CATEGORIES.MEMBERS,
@@ -448,6 +472,9 @@ export const SYSTEM_ROLE_DEFINITIONS: readonly SystemRoleDefinition[] = [
       PERMISSIONS.CART_MANAGE,
       PERMISSIONS.ORDER_MANAGE,
       PERMISSIONS.PAYMENT_MANAGE,
+      PERMISSIONS.POS_READ,
+      PERMISSIONS.POS_CREATE,
+      PERMISSIONS.POS_MANAGE,
       PERMISSIONS.REPORT_READ,
     ],
   },
@@ -467,6 +494,7 @@ export const SYSTEM_ROLE_DEFINITIONS: readonly SystemRoleDefinition[] = [
       PERMISSIONS.CART_MANAGE,
       PERMISSIONS.ORDER_CREATE,
       PERMISSIONS.PAYMENT_CREATE,
+      PERMISSIONS.POS_READ,
     ],
   },
 ];

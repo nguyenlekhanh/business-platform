@@ -1,0 +1,732 @@
+=======================================================================
+ PHASE 4 — POS + OFFLINE SYNC
+ DISCOVERY / PLANNING GATE REPORT (READ-ONLY — NO IMPLEMENTATION)
+=======================================================================
+
+Checkpoint : Phase 4 Discovery / Planning Gate (pre-implementation)
+Date       : 2026-08-31
+Status     : DISCOVERY COMPLETE — awaiting explicit approval of every
+             design decision in Section 14 before ANY implementation
+Phase 3
+baseline   : COMPLETE (U1–U9, final commit 2e2b80a, main pushed,
+             21 integration suites / 568 tests, 44 unit suites / 631
+             tests, tree clean)
+Authoritative
+documents  : docs/phase-progress.md (source of truth),
+             docs/phase3_u9_final_report.txt (Phase 3 handoff)
+
+=======================================================================
+1. HEADLINE FINDING — REQUIREMENTS ARE ALMOST ENTIRELY MISSING
+=======================================================================
+The repository was exhaustively searched (docs/phase-progress.md, all
+docs/phase3_*.txt reports, README.md, schema comments, source comments).
+The COMPLETE set of Phase 4 requirements that exist in the repository
+is:
+
+  R1. The roadmap title: "Phase 4 — POS + Offline Sync"
+      (docs/phase-progress.md:17, :37).
+  R2. ONE deferred scope item: inventory "no multi-location (POS
+      multi-store stock belongs to Phase 4)" (phase-progress.md:148-149;
+      echoed in schema.prisma:321 and the U9 final report:183).
+  R3. The standing freeze rules: rental code stays FROZEN; deploy-only
+      migration discipline; additive migrations only; tenant isolation
+      stays fail-closed; RBAC/auth untouched (phase-progress.md RULES + §0).
+
+That is all. There is NO POS requirements document, NO offline-sync
+specification, NO device/register/session model, NO sync-protocol
+description, NO conflict-resolution policy, NO API sketch, and NO
+acceptance criteria anywhere in the repository. Every architectural
+choice below is therefore a PROPOSAL derived from the existing
+Phase 3 architecture — NOT a documented requirement — and every one of
+them requires explicit user approval before implementation (Section 14).
+
+Ambiguities are NOT hidden; they are the primary output of this report.
+
+=======================================================================
+2. EXISTING SYSTEM RECAP — THE PHASE 3 BASELINE POS MUST BUILD ON
+=======================================================================
+(Modified: nothing. Read: everything listed in the gate instructions.)
+
+Modules (src/): category, product (Product+ProductVariant+Price),
+inventory, cart, order (Order+OrderItem), payment. Plus the frozen
+rental residue (reservation, equipment, parts of customer/asset).
+
+Tenant isolation: centralized fail-closed Prisma extension
+(tenant-scoping.extension.ts). TENANT_SCOPED_MODELS covers all ten
+Phase 3 models. tenantId ALWAYS server-derived from AsyncLocalStorage
+(X-Tenant-ID header); client-supplied tenantId -> 400; cross-tenant
+refs -> uniform 404; the only raw SQL is the health-check SELECT 1.
+
+Auth: JWT access tokens (15m) + sha256-hashed refresh tokens (7d,
+single-use rotation). JwtStrategy re-validates user ACTIVE on every
+request. Guard chain: JwtAuthGuard -> TenantResolutionGuard ->
+PermissionsGuard + TenantContextInterceptor.
+
+RBAC: platform-defined catalog; admin += *_MANAGE; employee += *_READ
++ CART_MANAGE + ORDER_CREATE + PAYMENT_CREATE; owner semantic-all.
+Catalog is extendable additively (Phase 3 added 20 keys).
+
+Money: integer minor units, BigInt/BIGINT, strings in JSON, exact
+integer math, ISO-4217 Char(3), one currency per order, Payment
+amount/currency derived server-side from the Order.
+
+Inventory (U4): single pool per variant (variantId @unique), lazy row
+(missing == 0), mutations ONLY via atomic guarded updateMany
+(quantityOnHand >= needed), DB CHECK >= 0, decrement-on-order /
+restock-on-cancel, concurrency arbitrated by the guarded update.
+
+Cart (U5): one OPEN cart per (tenant,user), items merge by
+(cartId,variantId), live prices at read time, NO money fields, NO
+stock reservation, ownership isolation within tenant.
+
+Order (U6): PENDING -> PAID (only via capture tx) | PENDING ->
+CANCELLED (restocks). PAID terminal. Status never client-writable.
+Immutable OrderItem snapshots (product/variant names, sku, unit price,
+currency). subtotal = sum of lineTotals; DB CHECK lineTotal =
+quantity*unit. T1 creation: variants ACTIVE + uniform currency prices +
+guarded stock decrement + Order + top-level OrderItems + cart
+CONVERTED — all-or-nothing. T3 cancel: guarded flip + restock.
+
+Payment (U7): PROCESSING -> CAPTURED | FAILED, terminal+immutable,
+idempotent re-capture/re-fail. T5 create: Order PENDING + no CAPTURED
+payment (multiple PROCESSING allowed). T2 capture: atomic guarded
+PROCESSING->CAPTURED + Order PENDING->PAID (count==1 both, rollback on
+0). T2 fail: Order untouched. Simulated gateway only (approved D4).
+
+Customer integration: Order.customerId nullable FK Restrict;
+customer-with-orders delete -> 409 (D1 P2003 branch, U8-verified).
+
+Existing POS-adjacent infrastructure (already in the codebase):
+  - Store model with StoreType enum that ALREADY INCLUDES 'POS'
+    (schema.prisma:28-37) and a generic settings Json field. Stores are
+    tenant-scoped with CRUD + RBAC + isolation (Phase 2).
+  - Asset has an optional same-tenant storeId (app-side validated).
+  - Membership has NO store binding (a member belongs to a tenant, not
+    a store).
+  - Redis (ioredis) is wired and health-checked but used for nothing
+    else yet — a natural building block if a queue/cache is needed.
+
+Migration discipline: ONE additive handwritten-SQL migration per unit,
+`prisma migrate deploy` only, never modify existing migrations, never
+db push/reset (reservation EXCLUDE constraint must survive). 14
+migrations applied; Phase 3 added 20260821050000..20260821110000.
+
+=======================================================================
+3. WHAT "POS" MUST MEAN GIVEN THIS REPOSITORY (PROPOSED)
+=======================================================================
+PROPOSAL (requires approval): POS = a tenant's store-scoped point-of-
+sale surface built ON TOP of Core Commerce, not beside it:
+
+  - A POS device (register/terminal) is a registered, tenant-scoped,
+    store-linked entity with its own identity, status lifecycle
+    (ACTIVE/SUSPENDED/RETIRED), and server-issued credentials.
+  - A POS session is a cashier (User) opening/working/closing a shift
+    on a device at a store.
+  - A POS sale reuses the Phase 3 Order/Payment engines: the POS
+    endpoint creates a REAL Order (PENDING) + REAL Payment, then
+    captures — exactly the U6/U7 paths — never a parallel order system.
+  - Store context: Phase 3 inventory is a single pool per variant; the
+    ONE documented Phase 4 item is multi-store stock. PROPOSAL: the
+    stock pool becomes per-(store, variant) for POS sales while the
+    same guarded/no-negative/decrement-on-order rules are preserved
+    (see Section 8 — this is the single biggest compatibility
+    decision).
+  - Receipt/finalization: Phase 3 has no fulfillment; PROPOSAL: POS
+    completes a sale as Order PAID + captured Payment (financial
+    history already immutable). A receipt is a projection of those
+    rows, not a new state.
+
+=======================================================================
+4. OFFLINE SYNC MODEL (PROPOSED)
+=======================================================================
+PROPOSAL (requires approval — the repository specifies NOTHING about
+the sync mechanism):
+
+  Device identity: server-registered PosDevice (id, tenantId, storeId,
+  name, status, apiKeyHash/credential, lastSeenAt). The server NEVER
+  trusts a client-asserted device; the device authenticates with its
+  own credential AND the cashier's JWT, and the tenant is ALWAYS
+  server-derived from context (unchanged).
+
+  Local operation IDs: while offline the device records operation
+  INTENTS in a local outbox. Each intent carries a client-generated
+  UUID (the idempotency key), the device id, a per-device monotonically
+  increasing sequence number, the intent type, and a JSON payload
+  snapshotting what the device observed (items, quantities, observed
+  prices, method, timestamps).
+
+  Server-generated IDs: entity PKs (cuid) remain 100% server-side —
+  exactly like every Phase 3 table. Client UUIDs are used ONLY as
+  idempotency keys, never as PKs (no malicious-ID-injection surface).
+
+  Sync batches: on reconnect the device pushes its outbox ordered by
+  sequence number. The server processes each operation INDEPENDENTLY
+  (per-op transaction) and returns a per-operation result:
+  {sequence, idempotencyKey, status: ACCEPTED|DUPLICATE|REJECTED,
+   entityId?, reason?}. DUPLICATE returns the ORIGINAL result (the
+  established re-capture idempotent-success pattern).
+
+  Dedup: a PosOperation table stores every accepted idempotency key
+  with a UNIQUE constraint — the database arbitrates duplicates the
+  same way guarded updateMany arbitrates concurrency.
+
+  Retry behavior: any operation the device did not receive an ack for
+  is retried on the next sync; dedup makes retries safe (exactly-once
+  effect, at-least-once delivery).
+
+  Ordering: per-device sequence numbers give deterministic replay order
+  within one device; cross-device ordering is NOT guaranteed (see
+  conflicts).
+
+  Pull/cursor: the device pulls catalog/price/stock updates using the
+  SAME keyset-cursor machinery the list endpoints already use
+  (src/common/pagination) — plus a data version watermark per store
+  (PROPOSAL) to make "what changed since" cheap.
+
+  Tombstones/deletes: Phase 3 deletes are hard deletes with RESTRICT
+  protection; PROPOSAL: the pull feed surfaces deletions as
+  soft-marked tombstone events in the sync stream (additive table),
+  never by weakening Phase 3 FK rules.
+
+  Reconnect: device re-authenticates (JWT + device credential), pushes
+  outbox, pulls deltas, reconciles results. Partial sync is safe
+  because every operation is independently idempotent.
+
+=======================================================================
+5. CRITICAL DESIGN QUESTIONS — ANSWERED FROM THE REPOSITORY WHERE
+   POSSIBLE, FLAGGED WHERE NOT
+=======================================================================
+Q1. Authoritative source of truth while ONLINE?
+    A. The server (PostgreSQL), by existing architecture — carts
+       already show live prices and hold no money; the server computes
+       every total. [Repository-grounded: yes]
+
+Q2. What may be created/modified while OFFLINE?
+    A. Repository: silent. PROPOSAL: offline devices may only append
+       local intents to their own outbox. NO server data is touched
+       offline (the server is unreachable by definition). [Approval
+       required]
+
+Q3. Which operations are safe to replay?
+    A. Repository-grounded: T5 payment create, T2 capture, and T2 fail
+       are already idempotent or guarded. T1 order creation is NOT
+       idempotent today (replay = duplicate order) — this is the gap
+       the idempotency-key mechanism must close (Section 7). [Mixed:
+       partially repository-grounded, partially proposal]
+
+Q4. How are duplicate operations detected?
+    A. PROPOSAL: (deviceId, clientOperationUuid) UNIQUE on PosOperation;
+       duplicates return the original result. [Approval required]
+
+Q5. Two devices modify the same entity offline?
+    A. PROPOSAL: devices never modify shared entities offline — they
+       only create NEW intents (sales). The only shared resource is
+       per-store stock. Two offline devices can each oversell the
+       store pool; the guarded update rejects the loser AT SYNC TIME.
+       [Approval required — see Q10]
+
+Q6. How are conflicts resolved?
+    A. PROPOSAL: server-authoritative. Stock conflicts -> the second
+       syncing sale is REJECTED with the established 409
+       'Insufficient stock' (same semantics as online). Catalog/price
+       edits are online-only operations (staff with RBAC), so they
+       cannot conflict offline. [Approval required — especially the
+       business rule for a paid-offline sale that fails at sync]
+
+Q7. Inventory during offline operation?
+    A. THE one documented Phase 4 item (R2). PROPOSAL: per-(store,
+       variant) pools; device shows last-synced local stock;
+       decrement-on-order stays; guarded update stays; DB CHECK stays;
+       oversell prevented at SYNC (not at offline sale time).
+       [Approval required — modifies a Phase 3 semantic scope]
+
+Q8. Can offline POS create an Order?
+    A. PROPOSAL: not the Order ROW — an offline SALE INTENT. The Order
+       is created server-side by the normal T1-equivalent path during
+       sync processing. The Order state machine is untouched.
+       [Approval required]
+
+Q9. Can offline POS accept Payment? If yes, what does that mean?
+    A. PROPOSAL: offline "payment acceptance" can only mean CASH
+       intents (card authorization is impossible offline even in real
+       gateways, and D4 is a simulated server-controlled gateway
+       anyway). The device records method=CASH + amount taken; at sync
+       the server creates the Payment and CAPTURES it immediately
+       (cash is captured when tendered). The Payment state machine is
+       untouched — sync just runs T5+T2 back-to-back. [Approval
+       required]
+
+Q10. What happens if an offline sale fails stock checks at sync?
+     A. REPOSITORY SILENT — genuine open question. Options: (a) reject
+         the sale (device must void/refund cash — but refunds are
+         explicitly out of Phase 4 scope), (b) accept into negative
+         stock (violates the DB CHECK and no-negative rule — not
+         acceptable), (c) hold as PENDING review. PROPOSAL leans (a)
+         with the rejection surfaced to the device, but this is a
+         BUSINESS decision. [EXPLICIT APPROVAL REQUIRED]
+
+Q11. Same operation reaches the server multiple times?
+     A. Dedup via the idempotency key (Q4) — second delivery returns
+         the first result. [Same pattern as re-capture, repository-
+         grounded in spirit]
+
+Q12. Device recovery after partial sync?
+     A. Per-op acks + at-least-once retries + dedup = safe replay from
+         any point. The device keeps unacked ops until acked.
+         [Proposal]
+
+Q13. How are failed operations reported?
+     A. Per-op result records in the sync response (status + reason
+         using the existing 409/404-style messages). [Proposal]
+
+Q14. What must be immutable/snapshotted for safe replay?
+     A. The intent payload itself (items, quantities, OBSERVED prices,
+         method) is frozen at capture time — like OrderItem snapshots.
+         OPEN SUB-QUESTION: at sync, does the server (a) re-price from
+         live Price rows (Phase 3 T1 behavior — server authoritative)
+         or (b) honor the device-observed price (POS reality — the
+         customer was charged that price)? PROPOSAL leans (b) for POS
+         intents with a server-side tolerance/rejection policy, but
+         this changes who is authoritative for price. [EXPLICIT
+         APPROVAL REQUIRED]
+
+=======================================================================
+6. SECURITY / THREAT MODEL (OFFLINE-SPECIFIC)
+=======================================================================
+Threat                        | Protection layer
+------------------------------+---------------------------------------------
+Stolen device                 | DEVICE layer: local outbox encryption is a
+                              | client concern. API/DB layer: device
+                              | credential revocation (PosDevice.status
+                              | SUSPENDED/RETIRED checked at every sync),
+                              | cashier JWT expiry (15m access token means
+                              | a stolen device cannot even authenticate
+                              | after the window), sync requires BOTH the
+                              | device credential AND a valid user JWT.
+Replayed operation           | API/DB: idempotency-key UNIQUE + dedup
+                              | returns original result; no side effects.
+Forged tenant/device identity| API: tenant ALWAYS server-derived
+                              | (unchanged extension); device identity is
+                              | server-issued and status-checked; a device
+                              | can never assert tenantId or storeId
+                              | outside its registration.
+Cross-tenant sync payload    | API/DB: every POS model registered in
+                              | TENANT_SCOPED_MODELS; sync endpoints run
+                              | under the same guard chain; uniform 404.
+Duplicate order submission   | DB: idempotency key per sale intent.
+Duplicate payment submission | DB: same key + existing T5 no-CAPTURED
+                              | guard (unchanged).
+Stale inventory               | API: guarded decrement at sync rejects
+                              | oversell (409) — the no-negative DB CHECK
+                              | remains the last line of defense.
+Stale authorization          | API: ALL permission checks execute at SYNC
+                              | TIME on the server, never trusted from the
+                              | device; PermissionsGuard + catalog
+                              | unchanged. NOTE: a cashier demoted while
+                              | the device is offline will have offline
+                              | sales REJECTED at sync — acceptable and
+                              | arguably correct, but a business decision
+                              | to confirm.
+Compromised offline queue    | API: the server re-validates EVERYTHING
+                              | (items exist, ACTIVE, prices, stock, RBAC,
+                              | tenant, store, device status, session
+                              | state); it never trusts client-computed
+                              | totals, tenant, or identity.
+Malicious client-generated
+IDs                           | API/DB: client UUIDs are idempotency keys
+                              | ONLY (never PKs, never FK targets, never
+                              | tenant/store selectors); entity PKs stay
+                              | server cuids.
+Partial batch replay         | API/DB: per-op idempotency makes any
+                              | subset safe to replay in any order.
+
+Summary: client is responsible for its own local outbox integrity;
+the API is the trust boundary (authn + tenant + RBAC + full payload
+re-validation + idempotency); the database enforces the final
+arbitration (uniques, guards, CHECKs). Server-side authorization is
+NOT weakened by offline — it simply executes at sync time.
+
+=======================================================================
+7. IDEMPOTENCY STRATEGY (PROPOSED)
+=======================================================================
+  - Every offline POS intent carries (deviceId, clientUuid) — the
+    composite idempotency key — plus a per-device sequence number.
+  - PosOperation table: UNIQUE(deviceId, clientUuid); columns for
+    sequence, type, payload (frozen snapshot), result status,
+    resulting entity ids, and processing timestamps.
+  - Processing rule: INSERT the PosOperation row first (the unique
+    constraint arbitrates races, exactly like the inventory guarded
+    update); on duplicate, return the recorded original result.
+  - Effect: at-least-once delivery, exactly-once effect — the same
+    philosophy as the approved re-capture idempotent-success.
+  - T1 order creation gains a POS-only idempotency wrapper WITHOUT
+    touching the Order model or its state machine (the PosOperation
+    row is the dedup gate; the Order row itself is unchanged).
+
+=======================================================================
+8. INVENTORY STRATEGY — THE ONE DOCUMENTED PHASE 4 CHANGE (R2)
+=======================================================================
+Repository statement: single pool per variant today; "POS multi-store
+stock belongs to Phase 4". PROPOSAL (two options — REQUIRES EXPLICIT
+APPROVAL):
+
+  Option A (modify Inventory): add nullable storeId to Inventory and
+    change the unique key from variantId to (storeId, variantId)
+    (null storeId = the existing tenant-level pool, preserving all
+    non-POS behavior). Pros: one table, one API. Cons: MODIFIES a
+    Phase 3 table and its unique constraint; every existing guarded
+    updateMany site must gain storeId; U4 tests change.
+
+  Option B (additive PosStock): new per-(store,variant) table used
+    only by POS sales; Inventory stays untouched as the tenant-level
+    pool. Pros: Phase 3 Inventory is FROZEN intact; additive only.
+    Cons: two stock tables; reconciliation between pools becomes an
+    explicit question (does a POS sale decrement BOTH pools?).
+
+  In EITHER option the invariants are preserved verbatim: atomic
+  guarded updates, quantityOnHand >= 0 DB CHECK, decrement-on-sale,
+  restock-on-cancel, oversell rejected with 409. The U9-final-report
+  statement "single pool (no multi-location until Phase 4)" shows the
+  docs EXPECT this change in Phase 4 — but its exact shape is the
+  single biggest open design decision.
+
+=======================================================================
+9. PAYMENT STRATEGY (PROPOSED)
+=======================================================================
+  - D4 stays: simulated, server-controlled, no external gateways.
+  - Offline: CASH intents only; card 'payments' cannot be authorized
+    offline and are rejected/queued-as-online-only.
+  - At sync: server runs T5 (create Payment from the Order, amount/
+    currency derived server-side) then IMMEDIATELY T2 capture for cash
+    (cash is captured when tendered). The PROCESSING state is passed
+    through atomically inside the sync transaction; the state machine
+    itself is unchanged.
+  - The existing T5 guard (Order PENDING, no prior CAPTURED) and T2
+    guards provide the duplicate/offline-payment protections for free.
+  - Receipt = projection of Order(PAID) + Payment(CAPTURED). No new
+    financial states, no refunds (explicitly out of scope).
+
+=======================================================================
+10. PROPOSED DATA MODEL (PLANNING ONLY — NO SCHEMA CHANGES MADE)
+=======================================================================
+All new tables are tenant-scoped (registered in TENANT_SCOPED_MODELS),
+cuid PKs, standard [tenantId],[tenantId,createdAt,id] indexes, additive
+handwritten-SQL migrations, deploy-only. NOTHING below is created yet.
+
+  PosDevice {
+    id cuid PK; tenantId; storeId (same-tenant FK, app-side validated
+    like Asset.storeId); name; status enum ACTIVE|SUSPENDED|RETIRED;
+    credentialHash String (server-issued secret, hashed — mirror the
+    RefreshToken sha256 pattern); lastSeenAt DateTime?;
+    UNIQUE(tenantId, name); FK tenant CASCADE, store RESTRICT
+  } Purpose: registered register/terminal identity; revocation point.
+
+  PosSession {
+    id cuid PK; tenantId; deviceId; storeId; userId (cashier);
+    status enum OPEN|CLOSED; openedAt; closedAt?;
+    INDEX (tenantId, deviceId, status); FKs cascade via device
+  } Purpose: shift lifecycle; scopes intents to an open session.
+
+  PosOperation {
+    id cuid PK; tenantId; deviceId; sessionId; clientUuid;
+    seq Int; type enum SALE_INTENT|... ; payload Json (frozen intent
+    snapshot); status enum PENDING|ACCEPTED|DUPLICATE|REJECTED;
+    resultCode?; resultEntityIds Json?; receivedAt; processedAt;
+    UNIQUE(deviceId, clientUuid)  // THE idempotency arbitration
+    UNIQUE(deviceId, seq)         // replay ordering
+  } Purpose: the sync inbox/outbox ledger — one row per offline
+    intent, dedup + ordering enforced by the database.
+
+  Store data-version watermark (pull feed) {
+    per-store (or per-tenant) monotonically increasing version +
+    tombstone events table — PROPOSAL, shape TBD at design approval.
+  }
+
+  Inventory: see Section 8 Options A/B — the decision changes the
+  migration plan materially.
+
+  Migration implications: 3-4 additive migrations (device, session,
+  operation, plus inventory choice), timestamp slots continuing from
+  20260821120000 upward, CHECK constraints in handwritten SQL where
+  needed (e.g., seq > 0), all existing migrations untouched.
+
+=======================================================================
+11. PROPOSED CHECKPOINT BREAKDOWN (MIRRORS PHASE 3'S UNIT STYLE)
+=======================================================================
+PROPOSAL — smallest safe increments; each ends with the mandatory
+CHANGE->VERIFY->DOC->CONTINUE loop and its own HARD STOP:
+
+  P4-U1  POS foundation: PosDevice + PosSession models, migration,
+         registration/credential issuance, status lifecycle
+         (suspend/revoke), RBAC keys (pos:read|create|manage style,
+         additive), tenant scoping, integration tests.
+  P4-U2  Online POS sale flow FIRST (no offline yet): a POS-facing
+         endpoint that reuses the existing Order/Payment services
+         (store-scoped stock if U3 lands first, else tenant pool);
+         proves the online path and receipts as projections.
+  P4-U3  Multi-store inventory (the documented R2 item): chosen
+         Option A or B from Section 8; guarded per-store pools;
+         concurrency tests; POS stock pull feed.
+  P4-U4  Offline operation model: PosOperation inbox, idempotency
+         unique constraints, intent snapshot payloads, dedup
+         behavior, per-device ordering.
+  P4-U5  Sync protocol: batch push (per-op transaction, per-op ack,
+         ACCEPTED|DUPLICATE|REJECTED + reason), pull feed with
+         cursor/version watermark, tombstones, retry/replay.
+  P4-U6  Offline payment boundary: cash intents, T5+T2-at-sync
+         coupling, duplicate payment protections (existing guards).
+  P4-U7  Conflict handling + reconciliation: stock conflicts at sync
+         (409 semantics), price authority decision (Q14), stale-
+         authorization rejections, device recovery flows.
+  P4-U8  Cross-device + cross-domain verification: two devices
+         offline simultaneously, last-unit race at sync, partial
+         batches, replay storms, tenant isolation probes, RBAC
+         matrix, end-to-end online AND offline POS flows.
+  P4-U9  Final Phase 4 verification gate (audit + full regression +
+         docs closure), mirroring the Phase 3 U9 gate.
+
+Ordering rationale: prove ONLINE POS before OFFLINE (U2 before U4);
+land the one documented schema change (U3) before sync depends on it;
+keep idempotency (U4) separate from transport (U5) so each is testable
+in isolation.
+
+=======================================================================
+12. TESTING STRATEGY (DESIGN BEFORE IMPLEMENTATION)
+=======================================================================
+Mirrors the proven Phase 3 pattern (unit: mocked-Prisma service/DTO
+specs; integration: full AppModule + supertest + real PostgreSQL +
+tenantA/B fixtures + direct DB row assertions + afterAll cleanup):
+
+  - Unit: DTO specs (whitelist/forbidNonWhitelisted on every new DTO),
+    service specs for device/session/operation/sync logic.
+  - HTTP integration: registration, credential auth, guard chain,
+    RBAC matrix (admin/employee/cashier-style/owner semantic-all),
+    uniform cross-tenant 404s, tenantId injection -> 400.
+  - Database: unique constraints (idempotency, per-device seq),
+    CHECK constraints, FK/cascade behavior.
+  - Replay/idempotency: same batch twice; same op at different
+    positions; retry after ack loss; DUPLICATE returns original
+    result with NO second side effect (stock/orders/payments
+    counted).
+  - Concurrency (deterministic): two devices syncing the same
+    idempotency key simultaneously; last-unit two-device offline
+    sales at sync (exactly one ACCEPTED, one 409-rejected — mirrors
+    the U4/U6 patterns); duplicate-key insert races.
+  - Offline/online transitions: outbox push ordering by seq; partial
+    batch (op N fails, N+1 still processed); reconnect after device
+    SUSPENDED (403 at sync).
+  - Conflict: stale price/stock vs intent snapshot; demoted cashier
+    rejected at sync; void/close semantics.
+  - Inventory: per-store guarded decrements; no negative; restock on
+    cancel (exactly once); tenant-level pool untouched (Option B) or
+    null-store rows preserved (Option A).
+  - Payment boundary: cash capture at sync; duplicate payment
+    blocked by T5 guard; card intents rejected offline.
+  - End-to-end: full POS sale online; full offline sale -> sync ->
+    PAID; cancel/void path; receipt projection data.
+
+=======================================================================
+13. PHASE 3 COMPATIBILITY CONSTRAINTS (FROZEN SURFACE)
+=======================================================================
+Phase 3 is FROZEN. Any Phase 4 change touching the following must be
+pre-identified as a compatibility decision (none are silently
+changeable):
+
+  - Order state machine: PROPOSED unchanged (offline = intents;
+    sync runs the existing T1). No new states, no client-writable
+    status.
+  - Payment state machine: PROPOSED unchanged (T5+T2 reused; D4
+    simulated gateway stays; no refunds/webhooks/providers).
+  - Inventory semantics: POTENTIALLY MODIFIED by R2 (the one
+    documented Phase 4 item) — Option A vs B decision required; the
+    RULES (guarded, no-negative, decrement-on-order, restock-once,
+    409 oversell) are preserved verbatim in both options.
+  - Tenant isolation: unchanged — all new models in
+    TENANT_SCOPED_MODELS; server-derived tenantId; uniform 404;
+    no raw SQL over tenant data.
+  - RBAC semantics: additive keys only (pos:*), existing keys and
+    role defaults untouched except additive employee/cashier grants
+    (if any) — requires approval per key.
+  - Money representation: unchanged — BigInt minor units, string JSON,
+    server-derived amounts, existing snapshots.
+  - Rental residue: stays FROZEN (no expansion/refactor/deletion).
+  - Migration discipline: additive handwritten SQL, deploy-only,
+    existing migrations never modified.
+
+=======================================================================
+14. OPEN QUESTIONS REQUIRING EXPLICIT APPROVAL (THE GATE OUTPUT)
+=======================================================================
+ARCHITECTURE-LEVEL (block P4-U1 onward until answered):
+  D1. Offline scope: is the offline surface limited to SALE INTENTS
+      (cash sales) as proposed, or must offline voids/returns/refunds
+      be designed too? (Refunds are explicitly out of Phase 3/4 scope
+      in the docs — confirm.)
+  D2. Inventory Option A (modify Inventory, null-storeId pool
+      preserved) vs Option B (additive PosStock table). The one
+      documented Phase 4 change — its shape decides U3 and the
+      migration plan.
+  D3. Price authority at sync: server re-prices from live Price rows
+      (pure Phase 3 behavior) vs honoring the device-observed price
+      snapshot (POS reality: the customer already paid that price).
+      Proposal leans device-observed with server validation; this is
+      a genuine money-authority decision.
+  D4. Business rule for an offline CASH sale that FAILS stock at
+      sync (Q10): reject + device voids cash? hold for review?
+      (Negative stock is not an option — DB CHECK.)
+  D5. Payment boundary: confirm cash-only offline intents with
+      immediate capture at sync (T5+T2 back-to-back), card payments
+      online-only.
+  D6. Device authentication model: device credential + cashier JWT
+      both required at sync (proposed), credential hashed sha256 like
+      RefreshToken; confirm revocation semantics (SUSPENDED device
+      rejects sync with 403).
+  D7. Stale-authorization rule: offline sales by a since-demoted/
+      suspended cashier are rejected at sync (proposed) — confirm
+      this is the desired business behavior.
+  D8. Pull-feed design: version watermark + tombstone events table
+      (proposed) vs reusing only the existing keyset cursors.
+  D9. Session semantics: is PosSession (shift open/close) required
+      for Phase 4, or deferred? It is proposed as the anchor for
+      intent ownership and reconciliation reports.
+  D10. Checkpoint structure: approve/adjust the P4-U1..U9 breakdown
+       (Section 11), including building ONLINE POS first (U2).
+
+=======================================================================
+15. FINAL BOUNDARY
+=======================================================================
+This report is a PLANNING artifact only. NO production code, schema,
+migration, or tests were created or modified. Nothing was committed
+or pushed. The three stray checkpoint .md files found in the repo
+root (u6/u7_cp1/u7_cp2_checkpoint.md — tracked leftovers from the
+Phase 3 sessions) were left exactly as they are; the working tree is
+clean at 2e2b80a.
+
+Phase 4 implementation MUST NOT begin until every open question in
+Section 14 is explicitly answered by the project owner. Until then:
+Phase 3 remains the frozen baseline, and the project stays at the
+Phase 3/4 boundary.
+
+=======================================================================
+16. APPROVED DECISIONS D1-D10 (2026-08-31, PROJECT OWNER)
+=======================================================================
+The following decisions were EXPLICITLY APPROVED after review of this
+report. They supersede the corresponding proposals/open questions
+above and are the authoritative Phase 4 planning baseline. All other
+rules in this report (Phase 3 freeze, migration discipline, security
+model) remain in force.
+
+D1 - OFFLINE SCOPE: APPROVED
+    Offline operations are limited to SALE INTENTS. Offline does NOT
+    support voids, returns, refunds, payment reversals, stock
+    adjustments, or arbitrary price overrides. Do not expand offline
+    operation types without explicit approval.
+
+D2 - INVENTORY ARCHITECTURE: APPROVED (Option A)
+    Extend the existing Inventory model to support store-scoped
+    inventory:
+      - nullable storeId where required for backward compatibility;
+      - uniqueness based on (storeId, variantId) for store inventory;
+      - preserve existing Phase 3 inventory invariants;
+      - preserve guarded atomic updates;
+      - never allow negative stock;
+      - Order creation decrements stock;
+      - Order cancellation restores stock exactly once.
+    Do NOT create a parallel PosStock authority unless a genuine
+    implementation blocker proves Option A impossible and is
+    explicitly reported. This is an approved Phase 4 schema
+    evolution, but migration design must still be reviewed carefully
+    before implementation.
+
+D3 - PRICE AUTHORITY: APPROVED
+    The SERVER is the final price authority at sync. The device's
+    offline-observed price is NOT authoritative for financial
+    persistence. At sync the server validates the product/variant,
+    retrieves the authoritative current price, and compares it to
+    the device-observed price. If the price has changed, the offline
+    sale intent is REJECTED (never silently repriced) with the
+    deterministic failure reason PRICE_CHANGED. Do not silently
+    charge the customer a different price than the device displayed.
+
+D4 - OFFLINE SALE FAILS STOCK VALIDATION: APPROVED
+    If an offline sale cannot be fulfilled because stock is
+    insufficient: reject the operation and mark it as failed/voided.
+    Never create negative stock, partially fulfill the order,
+    silently reduce quantities, silently drop items, or bypass
+    inventory guards. Deterministic failure reason: OUT_OF_STOCK.
+    The client must be able to understand why synchronization failed.
+
+D5 - OFFLINE PAYMENT: APPROVED
+    Offline payment is CASH-ONLY. Card/external providers are
+    online-only. At synchronization a valid offline cash sale uses
+    the EXISTING Payment machinery: Order -> Payment PROCESSING ->
+    Capture -> Payment CAPTURED -> Order PAID. Do not create a
+    second offline payment state machine. Do not add external
+    providers, refunds, webhooks, or new Payment states.
+
+D6 - DEVICE AUTHENTICATION: APPROVED
+    Sync requires BOTH a valid server-issued POS device credential
+    AND a valid cashier JWT. Device credentials must be
+    server-issued, revocable, stored hashed using the project's
+    established credential-hashing pattern (sha256 hex, RefreshToken
+    pattern), tenant/store scoped, and never client-generated as an
+    authority credential. A suspended/revoked device receives the
+    documented authorization failure. Do not trust device-provided
+    tenant identity.
+
+D7 - STALE AUTHORIZATION: APPROVED
+    Authorization is revalidated at synchronization time. If a
+    cashier was demoted or lost the required permission while the
+    device was offline, the offline operation is rejected during
+    sync. Offline mode does not grant permanent authorization.
+
+D8 - PULL SYNCHRONIZATION: APPROVED
+    Use a version watermark + tombstone/change-feed model for pull
+    synchronization. The design must support updates, deletes,
+    deterministic resume, reconnect after partial sync, no missed
+    changes, and no duplicate application of changes. Keep this
+    minimal. Do not turn Phase 4 into a general event-sourcing
+    platform unless explicitly approved.
+
+D9 - POS SESSION: APPROVED
+    PosSession is REQUIRED and belongs in P4-U1 POS Foundation. A
+    POS sale must be associated with the appropriate tenant, store,
+    device, POS session, and cashier. Session lifecycle and
+    authorization must be explicitly defined and tested.
+
+D10 - PHASE 4 CHECKPOINTS: APPROVED
+    Use the following Phase 4 structure:
+      P4-U1 - POS Foundation
+      P4-U2 - Online POS Sale
+      P4-U3 - Multi-store Inventory
+      P4-U4 - Offline Operation Model
+      P4-U5 - Sync Protocol
+      P4-U6 - Offline Payment Boundary
+      P4-U7 - Conflict & Reconciliation
+      P4-U8 - Cross-device / Cross-domain Verification
+      P4-U9 - Final Phase 4 Verification
+    Each checkpoint follows the established Phase 3 discipline:
+    Implement -> Test -> Verify -> Document -> Commit -> Push ->
+    HARD STOP.
+
+CRITICAL PHASE 3 COMPATIBILITY RULES (restated as approved):
+    Phase 3 is frozen and remains the baseline. Do NOT silently
+    change the Order state machine, Payment state machine, money
+    representation, tenant isolation, RBAC semantics, existing Cart
+    semantics, or existing Order financial snapshot semantics. Any
+    compatibility change must be explicitly identified and approved.
+    The only explicitly approved Phase 4 domain evolution at this
+    point is the store-scoped Inventory direction described in D2.
+
+IMPORTANT FINANCIAL RULE (D3 restated):
+    For offline price mismatch, DO NOT silently reprice. If
+    deviceObservedPrice !== serverAuthoritativePrice the offline
+    sale intent must fail deterministically with reason
+    PRICE_CHANGED. The customer-facing POS must know that the sale
+    was not accepted.
+
+IMPORTANT OFFLINE RULE (restated):
+    Offline authorization is NOT authority. The server remains
+    authoritative for tenant, device, cashier permissions,
+    product/variant validity, price, inventory, Order, and Payment.
+    The client may queue operations, but the server must revalidate
+    them during synchronization.

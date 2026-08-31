@@ -26,6 +26,8 @@ const TENANT_SCOPED_MODELS = new Set<Prisma.ModelName>([
   'Order',
   'OrderItem',
   'Payment',
+  'PosDevice',
+  'PosSession',
 ]);
 
 interface MutableOperationArgs {

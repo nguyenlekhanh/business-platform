@@ -474,6 +474,74 @@ model Payment {
   @@index([orderId])
 }
 
+// ---------- pos: devices + sessions (Phase 4 P4-U1) ----------
+// A PosDevice is a registered point-of-sale terminal, permanently bound to
+// one same-tenant Store (A5: no move — retire + re-register). Its server-
+// issued credential is stored ONLY as a sha256 hash (RefreshToken pattern);
+// the plaintext secret is returned exactly once at registration/rotation
+// (A2/D6). Lifecycle (A6): ACTIVE <-> SUSPENDED, then -> RETIRED (terminal,
+// no hard delete, no transition out, no credential rotation when retired).
+// A PosSession is a cashier shift on a device (D9): OPEN -> CLOSED (A3, bare
+// lifecycle, no financial summary fields in P4-U1). One OPEN session per
+// device is enforced by a partial unique index in handwritten SQL.
+enum PosDeviceStatus {
+  ACTIVE
+  SUSPENDED
+  RETIRED
+}
+
+enum PosSessionStatus {
+  OPEN
+  CLOSED
+}
+
+model PosDevice {
+  id             String         @id @default(cuid())
+  tenantId       String
+  storeId        String // permanent store binding (A5); same-tenant, app-side resolved like Asset.storeId
+  name           String // human label, unique within the tenant
+  status         PosDeviceStatus @default(ACTIVE)
+  credentialHash String         @unique // sha256 hex of the server-issued secret; never the plaintext
+  lastSeenAt     DateTime? // updated by the sync protocol (P4-U5); unused in P4-U1
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  store    Store        @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  sessions PosSession[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  // Keyset pagination parity with all other tenant-scoped lists.
+  @@index([tenantId, createdAt, id])
+  @@index([storeId])
+}
+
+model PosSession {
+  id       String           @id @default(cuid())
+  tenantId String
+  deviceId String
+  storeId  String // denormalized from the device for reporting + scoped queries
+  userId   String // cashier who opened the shift
+  status   PosSessionStatus @default(OPEN)
+  openedAt DateTime         @default(now())
+  closedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  device PosDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  store  Store     @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  user   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt, id])
+  @@index([deviceId, status])
+  @@index([userId])
+}
+
 // ---------- identity ----------
 model User {
   id           String       @id @default(cuid())
@@ -486,6 +554,7 @@ model User {
   refreshTokens RefreshToken[]
   carts        Cart[]
   orders       Order[]
+  posSessions  PosSession[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -535,6 +604,8 @@ model Tenant {
   orders      Order[]
   orderItems  OrderItem[]
   payments    Payment[]
+  posDevices  PosDevice[]
+  posSessions PosSession[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -631,4 +702,6 @@ model Store {
   @@index([tenantId, createdAt, id])
   @@index([type])
   assets Asset[]
+  posDevices PosDevice[]
+  posSessions PosSession[]
 }

@@ -2875,3 +2875,136 @@ without separate explicit approval.
 
 HARD STOP â€” Phase 3 â€” Core Commerce COMPLETE via U9.
 
+---
+
+## PHASE 4 P4-U1 â€” POS FOUNDATION COMPLETE (2026-08-31)
+
+STATUS: **P4-U1 = COMPLETE** (implemented, verified, documented). Phase 4 â€”
+POS + Offline Sync has begun per the approved D1â€“D10 decisions
+(docs/phase4_discovery_report.txt Â§16) and the approved P4-U1 plan
+(docs/phase4_p4u1_plan.txt) incl. decisions A1â€“A6. Scope delivered EXACTLY
+per the approved plan: PosDevice + PosSession foundation (no POS sales, no
+sync, no offline model, no inventory changes â€” those are P4-U2+). P4-U2 NOT
+started; awaiting explicit user approval.
+
+APPROVED DECISIONS IMPLEMENTED (A1â€“A6):
+- A1 RBAC: exactly pos:read | pos:create | pos:manage; admin += all three;
+  employee += pos:read ONLY (cashiers read-only); owner semantic-all; NO
+  pos:register key. pos:create authorizes device registration AND session
+  opening; pos:manage authorizes lifecycle transitions + credential rotation
+  + session close.
+- A2 Credential: server-issued 384-bit random (randomBytes(48)->base64url),
+  stored ONLY as sha256 hex (credentialHash @unique), returned in plaintext
+  EXACTLY ONCE (register/rotate responses), never in list/read endpoints,
+  never logged; verifyCredential() provides constant-time
+  (timingSafeEqual) comparison for the future sync protocol (X-POS-Device-
+  Credential header, P4-U5 â€” NOT implemented here).
+- A3 Session: bare OPEN -> CLOSED; NO financial summary fields.
+- A4 Registration: pos:create only; employees cannot register.
+- A5 Store binding: permanent; storeId not PATCHable (whitelist 400);
+  sessions inherit the DEVICE's store (client storeId injection -> 400).
+- A6 Lifecycle: ACTIVE <-> SUSPENDED; ACTIVE|SUSPENDED -> RETIRED terminal;
+  no transition out of RETIRED (checked FIRST for every action); no hard
+  delete; rotation forbidden for retired devices (409 'Device is already
+  retired').
+
+MIGRATION (exactly one, additive, applied via prisma migrate deploy):
+- 20260821120000_add_pos_foundation
+  CREATE TYPE "PosDeviceStatus" AS ENUM ('ACTIVE','SUSPENDED','RETIRED');
+  CREATE TYPE "PosSessionStatus" AS ENUM ('OPEN','CLOSED');
+  CREATE TABLE "PosDevice" (id TEXT PK cuid, "tenantId" TEXT NOT NULL,
+  "storeId" TEXT NOT NULL, name TEXT NOT NULL, status
+  "PosDeviceStatus" NOT NULL DEFAULT 'ACTIVE', "credentialHash" TEXT NOT
+  NULL, "lastSeenAt" TIMESTAMP(3), timestamps);
+  CREATE TABLE "PosSession" (id TEXT PK cuid, "tenantId", "deviceId",
+  "storeId", "userId", status "PosSessionStatus" NOT NULL DEFAULT 'OPEN',
+  "openedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, "closedAt"
+  TIMESTAMP(3), timestamps, CHECK ("closedAt" IS NULL OR "closedAt" >=
+  "openedAt"));
+  UNIQUE ("tenantId","name") on PosDevice; UNIQUE "credentialHash";
+  indexes ("tenantId"), ("tenantId","createdAt","id"), ("storeId") on
+  device; ("tenantId"), ("tenantId","createdAt","id"), ("deviceId",
+  "status"), ("userId") on session; PARTIAL UNIQUE INDEX
+  PosSession_one_open_per_device ON (deviceId) WHERE status='OPEN' (DB-level
+  one-open-session arbitration â€” deliberately stricter than the tolerated U5
+  cart race); FKs device.tenantId->Tenant CASCADE, device.storeId->Store
+  RESTRICT, session.tenantId->Tenant CASCADE, session.deviceId->PosDevice
+  CASCADE, session.storeId->Store RESTRICT, session.userId->User CASCADE.
+  No existing objects modified. migrate status: 15/15 up to date.
+
+FILES CHANGED (12):
+- prisma/schema.prisma (PosDeviceStatus/PosSessionStatus enums, PosDevice +
+  PosSession models, Tenant.posDevices/posSessions + User.posSessions +
+  Store.posDevices/posSessions backrelations)
+- prisma/migrations/20260821120000_add_pos_foundation/migration.sql (new)
+- src/common/database/prisma/tenant-scoping.extension.ts ('PosDevice',
+  'PosSession' in TENANT_SCOPED_MODELS â€” 15 models now)
+- src/rbac/permission-catalog.ts (POS_READ/CREATE/MANAGE, 'pos' category,
+  admin += all three, employee += pos:read)
+- src/pos/dto/pos.dto.ts (CreatePosDeviceDto storeId+name; UpdatePosDeviceDto
+  name only â€” storeId/status rejected; PosDeviceListQueryDto status filter;
+  OpenPosSessionDto deviceId only)
+- src/pos/pos-device.service.ts (register w/ one-time credential +
+  hash-only persistence + P2002->409; store resolve 404; get; keyset list;
+  PATCH name; guarded suspend/resume/retire with RETIRED-first check;
+  rotate-credential guarded against retired; verifyCredential constant-time)
+- src/pos/pos-session.service.ts (open: device must be ACTIVE, store derived
+  from device, P2002 race -> 409 'Device already has an open session';
+  get; guarded close OPEN->CLOSED, re-close -> 409)
+- src/pos/pos.controller.ts (POST /pos/devices, GET /pos/devices[/:id],
+  PATCH /pos/devices/:id, POST .../suspend|resume|retire|rotate-credential
+  [@HttpCode 200], POST /pos/sessions, GET /pos/sessions/:id, POST
+  /pos/sessions/:id/close [@HttpCode 200]; guard chain JWT ->
+  TenantResolutionGuard -> PermissionsGuard; whitelist pipes)
+- src/pos/pos.module.ts (new; imports TenantModule + RbacModule)
+- src/app.module.ts (PosModule registration)
+- Tests (new): src/pos/dto/pos.dto.spec.ts (17), src/pos/pos-device.service.spec.ts
+  (19), src/pos/pos-session.service.spec.ts (11), src/pos/pos.integration.spec.ts
+  (22: authn gates, A1 RBAC matrix incl. employee read-only + create-only,
+  owner semantic-all lifecycle, credential security incl. hash-only DB row +
+  no-exposure on reads + rotation, full A6 lifecycle matrix + terminal
+  guards, store RESTRICT P2003, session open/close/injections, DETERMINISTIC
+  dual-open race [201+409 via partial unique index] + dual-retire race
+  [200+409 via guarded updateMany], cross-tenant IDOR uniform 404 + state
+  intact + ambient-context scoping, keyset pagination + cursor chaining)
+
+VERIFICATION RESULTS (exact, actual runs, full gate re-run after lint fixes):
+- Focused POS unit: 3 suites, 47/47 passed. Focused POS integration: 1
+  suite, 22/22 passed.
+- Full unit suite (jest.unit.json): 47 suites, 678/678 passed
+  (was 44/631 post-Phase-3; +3 suites +47 tests exactly, all pre-existing
+  suites unchanged and green).
+- Full integration suite (jest.integration.json): 22 suites, 590/590
+  passed (was 21/568 post-U8; +1 suite +22 tests exactly; every
+  pre-existing suite unchanged and green).
+- npm run format: clean; npx prettier --check: all files pass.
+- npm run lint: 2 problems â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment). Zero
+  new lint issues from P4-U1 (type-safety errors found during the gate were
+  fixed before recording results).
+- npm run build (nest build): success.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (15 migrations). npx prisma generate: v6.19.3.
+
+IMPLEMENTATION NOTES (test-side corrections during the gate, no approved
+rule changed):
+1. P2002 mock errors must be real PrismaClientKnownRequestError instances
+   for the service type-guards to recognize them (same lesson as prior
+   units; fixed in specs).
+2. Lifecycle message semantics: after a RETIRED transition, a subsequent
+   suspend/resume originally returned the generic state message; the
+   service now checks RETIRED FIRST for every action so all terminal-state
+   rejections return the documented 'Device is already retired' 409 â€” a
+   message-only refinement fully within the approved A6 rule (guards and
+   409 behavior unchanged; tests updated).
+
+PHASE 3 COMPATIBILITY: ZERO Phase 3 behavior changes. No Order/Payment/
+Cart/Inventory/money/tenant/RBAC-semantics touched; Store/User/Tenant gained
+only additive backrelations; existing keys/defaults untouched; existing 14
+migrations untouched. Rental residue untouched.
+
+NEXT CHECKPOINT: P4-U2 â€” Online POS Sale. NOT started; awaiting explicit
+user approval.
+
+HARD STOP â€” P4-U1 complete; do not start P4-U2 without explicit approval.
+

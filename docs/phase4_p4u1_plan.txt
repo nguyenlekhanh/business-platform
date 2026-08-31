@@ -1,0 +1,412 @@
+=======================================================================
+ PHASE 4 — P4-U1 POS FOUNDATION
+ IMPLEMENTATION PLAN (PRE-IMPLEMENTATION — NOTHING BUILT YET)
+=======================================================================
+
+Checkpoint : Phase 4, Unit 1 (POS Foundation) — PLANNING DOCUMENT
+Date       : 2026-08-31
+Status     : PLAN AWAITING APPROVAL. No production code, schema,
+             migrations, tests, commits, or pushes exist for P4-U1.
+Baseline   : Phase 3 COMPLETE at 2e2b80a; decisions D1–D10 APPROVED
+             (docs/phase4_discovery_report.txt §16).
+
+-----------------------------------------------------------------------
+0. P4-U1 SCOPE (what this unit delivers — and does NOT deliver)
+-----------------------------------------------------------------------
+DELIVERS (foundation only):
+  1. PosDevice model + migration: registered POS terminal identity
+     (server-issued revocable credential, store linkage, lifecycle).
+  2. PosSession model + same migration: cashier shift lifecycle
+     (OPEN -> CLOSED) scoped to device+store+cashier (per D9).
+  3. Device credential issuance: one-time credential returned ONLY at
+     registration; stored sha256-hashed (RefreshToken pattern, per D6).
+  4. RBAC: additive pos:* permission keys + role defaults.
+  5. Tenant scoping: both models in TENANT_SCOPED_MODELS.
+  6. Full test suites (DTO + service unit; HTTP integration incl.
+     security matrix), full verification gate, docs, commit, push,
+     HARD STOP.
+
+DOES NOT DELIVER (later units — explicitly out of P4-U1 scope):
+  - No POS sale flow of any kind (P4-U2).
+  - No store-scoped Inventory / no Inventory changes (P4-U3, D2).
+  - No PosOperation / offline model / sync (P4-U4/U5).
+  - No offline payment boundary (P4-U6, D5).
+  - No API endpoint that USES the device credential for sync auth
+    (sync arrives in P4-U5; P4-U1 only registers + revokes devices
+    and manages sessions).
+
+-----------------------------------------------------------------------
+1. APPROVED VS PENDING DECISIONS
+-----------------------------------------------------------------------
+ALREADY APPROVED (binding for P4-U1):
+  D2  Inventory = Option A (affects P4-U3, NOT this unit).
+  D6  Device auth: credential + cashier JWT; hashed server-issued;
+      revocable; tenant/store scoped; suspended device -> documented
+      authz failure; never trust device-provided tenant identity.
+  D7  Authorization revalidated at sync time (P4-U5 concern, but
+      shapes the session/permission model designed here).
+  D9  PosSession REQUIRED in P4-U1; a POS sale must be associated
+      with tenant, store, device, session, cashier; session
+      lifecycle + authorization explicitly defined and tested.
+  D10 Checkpoint structure + Phase 3 discipline per unit.
+
+P4-U1 DETAILS STILL REQUIRING EXPLICIT APPROVAL (see §11):
+  A1. Permission key set for POS (exact pos:* keys + role defaults).
+  A2. Device credential transport format (how the one-time secret is
+      presented on sync requests in later units).
+  A3. Session close semantics (financial summary fields or bare
+      lifecycle; can a device have >1 open session).
+  A4. Registration permission model (who may register/revoke devices).
+  A5. Store linkage requirement (must a device's store be fixed at
+      registration, or can sessions move between stores).
+  A6. Soft-delete/retirement vs hard delete for devices.
+
+-----------------------------------------------------------------------
+2. PROPOSED ARCHITECTURE
+-----------------------------------------------------------------------
+MODULE: src/pos/ (new NestJS module, one aggregate root family per
+the Phase 3 convention; PosDevice + PosSession are one bounded
+foundation context — like Cart+CartItem were one U5 unit).
+
+Two aggregate roots:
+
+  PosDevice — the registered terminal.
+    - Created by tenant staff (with RBAC) for a specific same-tenant
+      Store; server generates the credential secret.
+    - Status lifecycle: ACTIVE -> SUSPENDED (revoke) -> RETIRED
+      (terminal). Guarded transitions, no client-writable status.
+    - Credential: server-issued random material (crypto.randomBytes
+      pattern, like RefreshToken), stored ONLY as sha256 hex
+      (credentialHash @unique), returned in plaintext EXACTLY ONCE
+      in the registration response; re-issuance = rotate credential.
+    - Never trusts device-asserted tenant/store: tenant comes from
+      context; storeId resolved via tenant-scoped Store lookup
+      (foreign/unknown store -> 404, the Asset.storeId precedent).
+
+  PosSession — the cashier shift on a device.
+    - Opened by an authenticated member User (cashier) on an ACTIVE
+      device; inherits the device's store; records openedBy userId.
+    - Lifecycle: OPEN -> CLOSED (guarded transition, closedAt set).
+      Only ONE OPEN session per device at a time (service-side guard
+      + tested; a small create race is prevented by a partial unique
+      index in the migration — see §5 — closing the U5 cart race
+      pattern's known tolerance).
+    - Authorization: opening/closing requires the pos:* permission
+      (A1); the opener is recorded; future sale intents (P4-U4+)
+      anchor to sessionId. Sessions are NOT cross-device.
+    - closedAt/finalized data: minimal per D9 (A3 pending).
+
+Both models registered in TENANT_SCOPED_MODELS (fail-closed
+centralized scoping; server-derived tenantId only; uniform cross-
+tenant 404; no raw SQL).
+
+Phase 3 reuse map (no modifications to frozen code):
+  - Credential hashing  <- RefreshToken sha256 pattern (auth).
+  - Store resolution    <- Asset.storeId app-side pattern (asset).
+  - Guard chain/pipes   <- identical to PaymentController (U7 CP6).
+  - Status machines     <- Order/Payment guarded-transition style.
+  - Migration style     <- additive handwritten SQL, deploy-only.
+
+-----------------------------------------------------------------------
+3. PROPOSED SCHEMA (PLANNING ONLY — schema.prisma UNTOUCHED)
+-----------------------------------------------------------------------
+enum PosDeviceStatus { ACTIVE  SUSPENDED  RETIRED }
+enum PosSessionStatus { OPEN    CLOSED }
+
+model PosDevice {
+  id             String   @id @default(cuid())
+  tenantId       String
+  storeId        String            // same-tenant Store (app-side
+                                   // resolved like Asset.storeId)
+  name           String            // human label, unique per tenant
+  status         PosDeviceStatus @default(ACTIVE)
+  credentialHash String   @unique // sha256 hex of server-issued secret
+  lastSeenAt     DateTime?        // updated at sync (later units)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant  @relation(..., onDelete: Cascade)
+  store   Store   @relation(..., onDelete: Restrict) // blocks store
+                                                   // delete w/ devices
+  sessions PosSession[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@index([tenantId, createdAt, id])   // keyset parity
+  @@index([storeId])
+}
+
+model PosSession {
+  id        String   @id @default(cuid())
+  tenantId  String
+  deviceId  String
+  storeId   String            // denormalized from device for reporting
+                               // + tenant-scoped queries
+  userId    String            // cashier (opener)
+  status    PosSessionStatus @default(OPEN)
+  openedAt  DateTime @default(now())
+  closedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant   @relation(..., onDelete: Cascade)
+  device PosDevice @relation(..., onDelete: Cascade) // sessions die
+                                                     // with device
+  store  Store    @relation(..., onDelete: Restrict)
+  user   User     @relation(..., onDelete: Cascade)  // cashier rows
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt, id])
+  @@index([deviceId, status])
+  @@index([userId])
+}
+
+DATABASE CONSTRAINTS (handwritten SQL only, Prisma DSL cannot express):
+  - CHECK openedAt <= closedAt (when closedAt not null).
+  - Partial unique index enforcing ONE OPEN session per device:
+      CREATE UNIQUE INDEX PosSession_one_open_per_device
+      ON PosSession(deviceId) WHERE status = 'OPEN';
+    (This deliberately closes the race tolerance the U5 cart
+     documented — a device is single-cashier-at-a-time by nature.)
+
+LIFECYCLE / DELETION:
+  - PosDevice: NO hard-delete endpoint (financial-history-adjacent
+    identity + future sync audit anchor); RETIRED is the terminal
+    soft state — mirrors Order/Payment no-delete precedent. (A6.)
+  - PosSession: NO delete (shift history). CASCADE via device only
+    (device rows are never deleted via API, so this is belt+braces).
+  - Store delete RESTRICT while devices/sessions reference it.
+
+CONCURRENCY:
+  - Session open: partial unique index arbitrates races (409
+    mapping on P2002-style violation; message 'Device already has an
+    open session').
+  - Status transitions: guarded updateMany WHERE status=<expected>
+    with count==1 (Payment T2 pattern).
+
+MIGRATION (PLANNING — not created):
+  - ONE additive migration: 20260821120000_add_pos_foundation.
+    Creates the two enums, two tables, indexes/FKs/CHECKs/partial
+    unique index. Additive only; nothing existing is modified;
+    applied via prisma migrate deploy; existing 14 migrations
+    untouched. Next timestamp slot continues the established chain.
+
+TENANT SCOPING ADDITION: 'PosDevice','PosSession' appended to
+TENANT_SCOPED_MODELS (additive; the established two-line change).
+
+-----------------------------------------------------------------------
+4. API SURFACE (PROPOSED — mirrors §11 Phase 3 conventions)
+-----------------------------------------------------------------------
+All routes under the standard guard chain
+JwtAuthGuard -> TenantResolutionGuard -> PermissionsGuard +
+TenantContextInterceptor + whitelist/transform/forbidNonWhitelisted
+ValidationPipe (PaymentController pattern).
+
+  POST   /pos/devices            pos:create (A1)
+         { storeId, name } -> 201 DeviceRegistrationSummary
+         { ..., credential: "<plaintext-secret>" }   // ONE-TIME
+         (credential NEVER appears again in any response)
+  GET    /pos/devices             pos:read
+         keyset-paginated list (shared pagination module) with
+         status filter (parity with /orders).
+  GET    /pos/devices/:id         pos:read -> DeviceSummary
+         (NEVER includes credentialHash or credential).
+  PATCH  /pos/devices/:id         pos:manage
+         { name? } only — status changes go through the lifecycle
+         endpoints below (status not client-writable via PATCH).
+  POST   /pos/devices/:id/suspend   pos:manage  ACTIVE->SUSPENDED
+  POST   /pos/devices/:id/resume    pos:manage  SUSPENDED->ACTIVE
+  POST   /pos/devices/:id/retire    pos:manage  *->RETIRED (terminal)
+     All transitions guarded + @HttpCode(200); invalid source states
+     -> 409 (Order-cancel message pattern). RETIRED is terminal.
+  POST   /pos/devices/:id/rotate-credential  pos:manage
+     -> 200 { credential } (new one-time secret; old hash replaced;
+     D6 revocation/rotation).
+
+  POST   /pos/sessions            pos:manage (cashier opens shift; A1)
+         { deviceId } -> 201 SessionSummary
+         (server derives store + cashier userId from context; device
+         must be ACTIVE; one-open-session enforced).
+  GET    /pos/sessions/:id        pos:read -> SessionSummary
+  POST   /pos/sessions/:id/close  pos:manage  OPEN->CLOSED
+         guarded + @HttpCode(200); closing an already-CLOSED session
+         -> 409.
+
+DTO whitelist rejections (400): tenantId, storeId injection on
+session create (store comes from the DEVICE, never the client),
+deviceId/status/id/timestamps injection, unknown fields — all
+integration-tested (Phase 3 matrix).
+
+ERRORS (uniform 404 policy): unknown/foreign device or session id
+-> 'Pos device not found' / 'POS session not found'; foreign storeId
+-> 'Store not found' (Asset.storeId precedent); suspended/retired
+device session-open -> 409 'Device is not active'.
+
+-----------------------------------------------------------------------
+5. SECURITY MODEL (P4-U1)
+-----------------------------------------------------------------------
+  - Tenant: server-derived via AsyncLocalStorage (unchanged); both
+    models tenant-scoped; cross-tenant reads/writes -> uniform 404.
+  - Device identity: server-issued only (D6); credentialHash never
+    exposed in ANY response or log (RefreshToken precedent); the
+    plaintext secret exists only in the registration/rotation
+    response. Rotation invalidates the old secret atomically.
+  - Revocation: SUSPENDED/RETIRED devices refuse future
+    session-opens (409) — the documented authorization failure for
+    device-level revocation. (Sync-time enforcement lands in P4-U5
+    and re-checks status on every request, per D6/D7.)
+  - RBAC: additive pos:* keys only; existing catalog untouched;
+    owner semantic-all unchanged; admin/employee defaults per A1.
+  - Session ownership: sessions belong to (device, cashier);
+    closing requires pos:manage (A1); no user-level isolation is
+    proposed for session READS within the tenant (tenant-scoped
+    reads, the Order precedent) — pending A1 confirmation.
+  - Input: every DTO whitelisted; status never client-writable.
+  - No raw SQL; no nested relation writes; top-level ops only.
+
+-----------------------------------------------------------------------
+6. TEST STRATEGY (mirrors the proven Phase 3 patterns)
+-----------------------------------------------------------------------
+UNIT (jest.unit.json):
+  - src/pos/dto/*.spec.ts: valid/invalid payloads, whitelist
+    rejection of tenantId/status/id/timestamps/unknown fields,
+    MaxLength bounds.
+  - src/pos/pos-device.service.spec.ts: mocked Prisma; fail-closed
+    tenant context; store resolution 404 (foreign/unknown);
+    P2002->409 duplicate device name; credential issuance returns
+    secret exactly once + hash-only persistence (sha256 hex match);
+    rotation replaces hash; guarded suspend/resume/retire count==1
+    checks; retired terminal (second retire -> 409).
+  - src/pos/pos-session.service.spec.ts: open on ACTIVE device only;
+    store derived from device (client storeId ignored/rejected);
+    one-open-session race fallback (P2002-style -> 409); guarded
+    close; closedAt set; closed session re-close -> 409.
+
+INTEGRATION (jest.integration.json, real AppModule + supertest +
+real PostgreSQL, tenantA/B fixtures):
+  - AuthN gates: 401 unauthenticated on every route; 403 outsider.
+  - RBAC matrix: no-permission 403 per key; manage-only vs read-only
+    vs create-only; employee (if granted per A1); owner semantic-all
+    full lifecycle without grants.
+  - Tenant isolation/IDOR: cross-tenant device GET/PATCH/suspend/
+    session-open/close -> uniform 404 with owning-tenant state
+    untouched (direct DB row verification, U8 pattern); cross-tenant
+    storeId at registration -> 404; tenantId injection -> 400.
+  - Lifecycle: register -> suspend -> resume -> retire terminal
+    (full matrix incl. invalid source states -> 409); retired
+    device cannot open a session.
+  - Credential security: registration response contains the secret
+    exactly once; NO row (or any later GET) contains/equals the raw
+    material; the stored hash equals sha256(secret); rotation
+    invalidates (old hash gone, new hash present, secret returned
+    once).
+  - Session lifecycle: open/close happy path; two concurrent opens
+    on one device -> exactly one 201 + one 409 (deterministic
+    concurrency, U4 inventory-race pattern); close is guarded and
+    idempotent-rejected (409); CHECK openedAt<=closedAt respected.
+  - Store interaction: store with devices cannot be deleted (409,
+    the Category/Product P2003 precedent).
+
+VERIFICATION GATE (per D10 Phase 3 discipline):
+  focused suites -> full unit -> full integration -> format ->
+  lint (only the 2 known pre-existing asset errors acceptable) ->
+  build -> prettier --check -> prisma validate -> migrate status
+  (expect 15 migrations after deploy) -> docs -> commit -> push ->
+  HARD STOP.
+
+DETERMINISTIC CONCURRENCY REQUIRED:
+  - Dual session-open race (partial unique index arbitrates).
+  - Dual status transition race on one device (guarded updateMany:
+    exactly one winner).
+
+-----------------------------------------------------------------------
+7. FILE MANIFEST (TO BE CREATED AT IMPLEMENTATION TIME — none exist)
+-----------------------------------------------------------------------
+  prisma/schema.prisma                                  [modified]
+  prisma/migrations/20260821120000_add_pos_foundation/  [new]
+  src/common/database/prisma/tenant-scoping.extension.ts [modified]
+  src/rbac/permission-catalog.ts                        [modified]
+  src/app.module.ts                                     [modified]
+  src/pos/pos-device.service.ts / .spec.ts              [new]
+  src/pos/pos-session.service.ts / .spec.ts             [new]
+  src/pos/pos.controller.ts                             [new]
+  src/pos/pos.module.ts                                 [new]
+  src/pos/dto/pos.dto.ts / .spec.ts                     [new]
+  src/pos/pos.integration.spec.ts                       [new]
+  docs/phase-progress.md                                 [modified]
+  docs/phase4_p4u1_report.txt                            [new]
+
+NO production files are modified before this plan is approved.
+
+-----------------------------------------------------------------------
+8. PHASE 3 COMPATIBILITY NOTES (P4-U1-SPECIFIC)
+-----------------------------------------------------------------------
+  - Zero Phase 3 behavior changes: no Order/Payment/Cart/Inventory/
+    money/tenant/RBAC-semantics touched. Store model gains ONLY
+    backrelations (additive, the U6 Customer.orders precedent).
+  - Tenant-scoping extension: two additive Set entries.
+  - Permission catalog: additive keys + additive role-default grants
+    (A1) — existing keys/defaults untouched.
+  - Migration: one additive handwritten SQL file; deploy-only; the
+    reservation EXCLUDE constraint remains untouched.
+
+-----------------------------------------------------------------------
+9. WHAT P4-U1 DELIBERATELY LEAVES OPEN FOR LATER UNITS
+-----------------------------------------------------------------------
+  - Credential VERIFICATION transport (header shape) — P4-U5 (A2).
+  - Sync endpoints, PosOperation, idempotency — P4-U4/U5.
+  - lastSeenAt updates — P4-U5 (column exists, unused here).
+  - Multi-store inventory (D2 Option A) — P4-U3.
+  - Session financial summary fields (if wanted) — A3/P4-U7.
+  - Offline anything — P4-U4+ (D1).
+
+-----------------------------------------------------------------------
+10. IMPLEMENTATION CHECKPOINT PLAN (within P4-U1, once approved)
+-----------------------------------------------------------------------
+  C1. Schema + migration + tenant scoping + RBAC keys (validate ->
+      deploy -> generate; focused checks).
+  C2. DTOs + PosDeviceService + unit specs (incl. credential
+      security assertions).
+  C3. PosSessionService + unit specs (incl. race-fallback tests).
+  C4. Controller + module wiring + build.
+  C5. Integration suite (security matrix + lifecycle + concurrency).
+  C6. Full gate -> docs (phase-progress + p4u1 report) -> commit ->
+      push -> HARD STOP.
+  Estimated suite delta: +1 integration suite (~28-34 tests),
+  +2-3 unit suites (~30 tests), +2 migrations none, 15 total.
+
+-----------------------------------------------------------------------
+11. REMAINING DECISIONS REQUIRING EXPLICIT APPROVAL
+-----------------------------------------------------------------------
+  A1. Exact pos:* permission keys + role defaults. PROPOSAL:
+        pos:read | pos:create (register device) | pos:manage
+        (suspend/resume/retire/rotate, sessions open/close)
+      admin += pos:manage; employee += pos:manage (cashiers are
+      employees — but this grants device registration unless split;
+      ALTERNATIVE: pos:register key for registration only); owner
+      semantic-all. The cashier-vs-admin split needs a decision.
+  A2. Credential transport format for sync (P4-U5): PROPOSAL header
+        'X-POS-Device-Credential: <secret>' alongside the cashier
+        Bearer JWT; constant-time hash comparison (argon2 not needed
+        for 384-bit random material — RefreshToken precedent).
+  A3. Session close payload: bare close (PROPOSAL) vs financial
+      summary (opening/closing cash counts) — the latter adds money
+      fields; recommend deferring summary to P4-U7.
+  A4. Who registers devices: pos:manage (admin-style, PROPOSAL) vs a
+      dedicated pos:register key.
+  A5. Store binding: fixed at registration (PROPOSAL — sessions
+      inherit; moving a device = retire + re-register) vs PATCHable
+      storeId. PROPOSAL preserves audit clarity.
+  A6. Device deletion: no hard delete, RETIRED terminal (PROPOSAL,
+      Order/Payment precedent). Confirm.
+
+=======================================================================
+FINAL BOUNDARY
+=======================================================================
+This is a PLAN ONLY. Nothing has been implemented, migrated,
+committed, or pushed. P4-U1 implementation MUST NOT begin until:
+  (1) this plan is explicitly approved, AND
+  (2) open items A1–A6 are explicitly decided.
+Phase 3 remains the frozen baseline at 2e2b80a.
