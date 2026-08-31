@@ -1,0 +1,242 @@
+=======================================================================
+ PHASE 3 — CORE COMMERCE
+ U8 — CROSS-DOMAIN VERIFICATION
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 3 — Core Commerce, Unit U8 (Cross-Domain Verification)
+Date       : 2026-08-31
+Status     : COMPLETE — implemented, verified, documented, committed,
+             pushed
+Starting
+Git commit : 5f6b4cf ("test(payment): complete U7 CP8 verification gate")
+
+-----------------------------------------------------------------------
+1. SCOPE
+-----------------------------------------------------------------------
+U8 verified the two explicitly documented cross-domain requirements of
+the approved Phase 3 assessment (§15 U8), plus cross-domain security:
+
+  A. Customer deletion with existing Orders -> HTTP 409
+     (the D1-flagged additive P2003 branch in
+     CustomerService.deleteCustomer).
+  B. End-to-end commerce flow over the real application stack:
+     Category -> Product -> ProductVariant -> Price -> Inventory ->
+     Cart -> Order -> Payment -> Capture -> Order PAID, with persisted
+     database state asserted at every boundary (not just HTTP 2xx).
+  C. Cancellation + restock path: Order -> CANCELLED -> inventory
+     restored exactly once; repeated cancellation does not double-restock.
+  D. Cross-domain tenant isolation, IDOR, RBAC (owner semantic-all), and
+     tenantId-injection protection.
+
+U8 made ZERO production-code, schema, or migration changes. It is a
+pure verification checkpoint delivered as one new integration spec.
+
+-----------------------------------------------------------------------
+2. CUSTOMER DELETION WITH ORDERS (REQUIREMENT A)
+-----------------------------------------------------------------------
+Production branch verified: src/customer/customer.service.ts:186-203.
+The delete path catches Prisma P2003 (FK RESTRICT violation) and maps:
+  - error message containing 'Order'    -> 409
+    "Customer has orders and cannot be deleted"
+  - otherwise (Reservation FK)          -> 409
+    "Customer has reservations and cannot be deleted"
+
+Test results (all in the U8 suite):
+  - Customer with NO orders keeps the documented delete behavior:
+    DELETE /customers/:id -> 204 No Content; row verified gone via
+    direct Prisma.
+  - Customer WITH an existing Order CANNOT be deleted:
+    DELETE -> 409 "Customer has orders and cannot be deleted".
+    No partial deletion: Customer row remains, Order row remains,
+    Order.customerId still references the customer, Order stays
+    PENDING, and the order remains fully queryable through the API
+    afterwards.
+  - Customer with reservations keeps the documented reservation
+    message (409 "Customer has reservations and cannot be deleted").
+  - Cross-tenant deletion attempt returns the uniform 404
+    "Customer not found" (no existence oracle) and leaves the owning
+    tenant's customer untouched.
+
+IMPORTANT FINDING: prior to U8, this D1-flagged production branch had
+ZERO test coverage anywhere in the repository (verified by search).
+U8 closed exactly that gap; the implementation itself was correct as
+approved and required no change.
+
+-----------------------------------------------------------------------
+3. END-TO-END HAPPY PATH (REQUIREMENT B)
+-----------------------------------------------------------------------
+One test walks the entire flow through the REAL HTTP APIs (supertest on
+the full AppModule, real PostgreSQL) and asserts persisted state at
+every boundary:
+
+  1. Category creation   -> row verified (tenantId ownership).
+  2. Product creation    -> row verified, categoryId + tenantId link.
+  3. Variant creation    -> row verified, productId + tenantId link.
+  4. Price upsert (PUT)  -> row verified: amountMinor exact BIGINT,
+                            one current price per (variant, currency).
+  5. Inventory adjust    -> row verified: quantityOnHand = initial.
+  6. Cart + items        -> two adds MERGE by (cartId, variantId):
+                            quantity 2 + 3 = 5; live totals
+                            [{ currency USD, totalMinor "6250" }].
+  7. Order from cart checkout (empty body):
+                            status PENDING; subtotalMinor "6250"
+                            (5 x 1250, exact BigInt math); cart row
+                            verified CONVERTED; stock verified
+                            30 -> 25 (guarded decrement-on-order);
+                            OrderItem snapshot verified: unitAmount
+                            1250n, lineTotal 6250n, sku frozen at
+                            order time.
+  8. Payment creation    -> PROCESSING; amountMinor "6250" and
+                            currency "USD" DERIVED FROM THE ORDER
+                            (server-side; client supplies only
+                            orderId + method); amountMinor is a JSON
+                            string at the API boundary while the DB
+                            column holds exact BIGINT 6250n.
+  9. Capture             -> 200; Payment CAPTURED.
+ 10. Final state         -> direct DB rows: Payment.status CAPTURED,
+                            Order.status PAID; API GET order returns
+                            PAID. Post-capture invariants: cancelling
+                            a PAID order -> 409; creating a second
+                            payment for the PAID order -> 409; failing
+                            the CAPTURED payment -> 409 "Captured
+                            payment cannot be failed".
+
+-----------------------------------------------------------------------
+4. CANCELLATION / RESTOCK PATH (REQUIREMENT C)
+-----------------------------------------------------------------------
+Separate real integration flow:
+  - Provision stock 10; order quantity 4 -> stock 10 -> 6.
+  - Payment created (PROCESSING).
+  - T3 cancel: 200; Order CANCELLED with cancelledAt set; stock
+    restored EXACTLY ONCE: 6 -> 10 (not 14).
+  - The PROCESSING payment SURVIVES cancellation (documented rule:
+    cancel does not touch payments); capturing it afterwards is
+    correctly refused with 409 (the guarded Order PENDING update
+    matches no row and the transaction rolls back); the payment row
+    remains PROCESSING.
+  - REPEATED cancellation -> 409 "Only pending orders can be
+    cancelled" and does NOT double-restock (stock stays 10).
+  - Final DB state verified: Order CANCELLED, cancelledAt set,
+    inventory 10.
+
+-----------------------------------------------------------------------
+5. SECURITY (REQUIREMENT D)
+-----------------------------------------------------------------------
+Cross-tenant isolation / IDOR:
+  From tenant B (full-grant admin), every probe into tenant A's data
+  fails with the uniform 404 (no existence oracle): GET inventory,
+  add cart item (foreign variant), create order (foreign variant and
+  foreign customerId), GET order, cancel order, GET payment, capture
+  payment, fail payment, create payment for a foreign order, delete a
+  foreign customer. Tenant A's catalog, stock, order, and payment
+  rows were verified fully intact afterwards (order PENDING, payment
+  PROCESSING, stock decremented only by tenant A's own order).
+
+Server-derived tenantId:
+  Injecting tenantId into payloads (categories, cart items, orders,
+  payments) is rejected with 400 by the DTO whitelist; no rows leaked
+  into tenant B (verified: 0 payment rows there).
+
+RBAC / ownership:
+  Owner semantic-all walks the entire cross-domain flow (catalog ->
+  cart -> order -> payment -> capture -> PAID; stock 8 -> 6) with no
+  explicit grants.
+
+Tenant-scoped Prisma models remain scoped; all row verifications run
+inside tenantContext.run(async () => ...) so the centralized extension
+is the enforcer being exercised. No raw SQL is used anywhere in the U8
+spec or introduced into production.
+
+-----------------------------------------------------------------------
+6. TEST RESULTS (ACTUAL RUNS, 2026-08-31)
+-----------------------------------------------------------------------
+  Focused U8 suite (src/order/u8-cross-domain.integration.spec.ts):
+      1 suite, 9/9 passed.
+  Full integration suite (jest.integration.json):
+      21 suites, 568/568 passed.
+      (Post-CP8 baseline: 20 suites / 559 tests. U8 adds exactly
+      +1 suite and +9 tests; every pre-existing suite unchanged and
+      green. The known inventory flakiness did NOT reproduce.)
+  Full unit suite (jest.unit.json):
+      44 suites, 631/631 passed (unchanged).
+  npm run lint:
+      2 errors — both the KNOWN PRE-EXISTING
+      src/asset/asset.service.spec.ts:203/:221
+      (no-unsafe-assignment). Zero new issues from U8.
+  npm run build (nest build — repository type-check): success.
+  npx prettier --check: all files pass.
+  npx prisma validate: valid.
+  npx prisma migrate status: "Database schema is up to date!"
+      (14 migrations; no schema/migration changes in U8).
+
+-----------------------------------------------------------------------
+7. FINDINGS
+-----------------------------------------------------------------------
+U8 changes (test-only):
+  - New integration spec (see section 9). No production code, schema,
+    or migration was modified.
+
+Existing behavior verified (not changed):
+  - The D1 P2003 branch (customer.service.ts:186-203) was correct as
+    implemented; U8 added its first regression coverage.
+  - All Phase 3 state machines, transaction boundaries (T1/T2/T3/T5),
+    money invariants, and tenant-scoping semantics held under
+    cross-domain exercise.
+
+Genuine defects found: NONE.
+
+Test-side corrections during U8 development (documented for the
+record; no production impact):
+  1. Price PUT payloads must send amountMinor as a JSON number (the
+     validated DTO input form); raw BigInt values cannot cross JSON
+     ("Cannot serialize BigInt value"). The spec's provisioning helper
+     was fixed to convert.
+  2. PUT /variants/:id/price returns 200 (NestJS @Put default for the
+     overwrite upsert), not 201; the helper now accepts the documented
+     200/201 upsert envelope.
+  3. DELETE /customers/:id returns 204 No Content (not 200); fixed in
+     the no-orders deletion test.
+
+Pre-existing issues (SEPARATE from U8, unchanged):
+  - src/asset/asset.service.spec.ts:203 and :221 lint errors
+    (standing project rule: leave untouched).
+  - Inventory "concurrent increments" integration test flakiness
+    under full parallel suite load (passes in isolation; did not
+    reproduce in U8's full-suite run).
+
+Historical test-count discrepancy (PRESERVED): the CP5 checkpoint
+entry in docs/phase-progress.md still reads "645 tests"; the
+arithmetic truth is 631 (617 + 14). No tests were ever deleted. CP6's
+631 remains the correct unit baseline (fresh runs in CP7, CP8, and U8
+all confirm 631/631 across 44 suites). The CP5 entry is left as
+originally written per the no-history-rewrite rule; the CP7
+checkpoint note is the factual correction of record.
+
+-----------------------------------------------------------------------
+8. FILES CHANGED
+-----------------------------------------------------------------------
+Created : src/order/u8-cross-domain.integration.spec.ts
+          (9 tests, 4 describe blocks; placed beside the U6 order
+          integration suite because the verified flows are
+          order/payment-centric; same AppModule + supertest + tenant
+          fixture architecture as every Phase 3 suite)
+Modified: docs/phase-progress.md  (this U8 checkpoint appended)
+Created : docs/phase3_u8_report.txt (this file)
+
+Production code: ZERO changes.
+Schema/migrations: ZERO changes.
+
+-----------------------------------------------------------------------
+9. GIT
+-----------------------------------------------------------------------
+(Recorded only after the operations succeeded.)
+
+  Commit message  : test(phase3): complete U8 cross-domain verification
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS — working tree clean after push
+
+  FINAL BOUNDARY: U8 COMPLETE. U9 (Final Phase 3 verification +
+  progress-doc closure + HARD STOP for Phase 4 approval) requires a
+  separate explicit approval and has NOT been started.

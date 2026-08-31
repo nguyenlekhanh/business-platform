@@ -2646,6 +2646,112 @@ NEXT UNIT: U8 â€” Cross-domain verification (customer-delete-with-orders 40
 end-to-end flow test category->product->variant->price->stock->cart->order->
 pay->cancel-restock), full gate. NOT started; awaiting explicit user approval.
 
-HARD STOP â€” U7 (Payment) COMPLETE via CP8; do not start U8 without explicit
-approval.
+HARD STOP â€” U7 (Payment) COMPLETE via CP8; do not start U8 without explicit approval.
+
+---
+
+## U8 CROSS-DOMAIN VERIFICATION â€” COMPLETE (2026-08-31)
+
+STATUS: U8 = COMPLETE (implemented, verified, documented). Scope delivered
+EXACTLY per approved assessment Â§15 U8 line: customer-delete-with-orders 409
+(the D1-flagged additive P2003 branch), end-to-end flow test (category->
+product->variant->price->stock->cart->order->pay->cancel-restock paths),
+full gate. NO production-code, schema, or migration changes were required.
+U9 NOT started; awaiting explicit user approval.
+
+FILES CHANGED (1):
+- src/order/u8-cross-domain.integration.spec.ts (NEW â€” 9 tests across 4
+  describe blocks; placed in src/order/ beside the U6 order integration
+  suite because the flows under test are order/payment-centric)
+
+A. CUSTOMER DELETION WITH ORDERS (documented D1 branch) â€” VERIFIED:
+- Customer with NO orders keeps the documented delete behavior (204, row
+  gone).
+- Customer WITH an existing Order cannot be deleted: HTTP 409 'Customer has
+  orders and cannot be deleted' (the P2003 Order branch in
+  customer.service.ts:186-203, which previously had ZERO test coverage â€”
+  this was the exact gap U8 was chartered to close). No partial deletion:
+  both Customer and Order rows remain, relationship intact (customerId
+  preserved, order still PENDING), order still fully queryable via API.
+- Customer with reservations keeps the documented reservation message
+  ('Customer has reservations and cannot be deleted').
+- Cross-tenant deletion attempt -> uniform 404 'Customer not found'; the
+  owning tenant's customer row is untouched.
+
+B. END-TO-END HAPPY PATH â€” VERIFIED (persisted state at every boundary):
+Category -> Product -> Variant -> Price -> Inventory -> Cart (merge 2+3=5,
+live totals 6250) -> Order from cart checkout (PENDING, subtotal '6250',
+cart CONVERTED) -> stock 30->25 (guarded decrement) -> OrderItem snapshot
+(unit 1250n, line 6250n, exact BigInt math) -> Payment (PROCESSING,
+amount/currency derived from Order, string BigInt) -> Capture (200) ->
+Payment CAPTURED + Order PAID (direct DB rows + API). Post-capture
+invariants: PAID order cannot be cancelled (409); second payment for a
+PAID order refused (409); CAPTURED payment cannot be failed (409).
+
+C. CANCELLATION + RESTOCK PATH â€” VERIFIED:
+Order qty 4 (stock 10->6) -> payment PROCESSING -> T3 cancel (200,
+CANCELLED, cancelledAt set) -> stock restored exactly once (6->10, not 14)
+-> capture of the surviving PROCESSING payment correctly refused (409,
+Order no longer PENDING; payment stays PROCESSING per documented rule â€”
+cancel does not touch payments) -> repeated cancellation 409 and does NOT
+double-restock (stock stays 10).
+
+D. CROSS-DOMAIN SECURITY â€” VERIFIED:
+- Every cross-tenant probe from tenant B into tenant A's catalog/inventory/
+  cart/order/payment/customer fails with the uniform 404 (no existence
+  oracle): GET inventory, add cart item (foreign variant), create order
+  (foreign variant / foreign customerId), GET/cancel order, GET/capture/
+  fail payment, create payment for foreign order. Tenant A's state fully
+  intact afterwards.
+- tenantId injection rejected with 400 on categories, cart items, orders,
+  and payments; nothing leaked into tenant B (0 payment rows there).
+- Owner semantic-all walks the full cross-domain flow without explicit
+  grants (catalog -> cart -> order -> payment -> capture -> PAID; stock
+  8->6).
+
+VERIFICATION RESULTS (exact, actual runs, 2026-08-31):
+- Focused U8 suite: 1 suite, 9/9 passed.
+- Full integration suite (jest.integration.json): 21 suites, 568/568 passed
+  (was 20 suites / 559 tests post-CP8; +1 suite, +9 tests exactly; every
+  pre-existing suite unchanged and green; inventory flakiness did not
+  reproduce).
+- Full unit suite (jest.unit.json): 44 suites, 631/631 passed (unchanged).
+- npm run lint: 2 problems â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment). Zero new
+  lint issues from U8.
+- npm run build (nest build): success.
+- npx prettier --check: all files pass.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (14 migrations). No schema/migration changes in U8.
+
+U8 FINDINGS (no production defects found; three test-side corrections
+during development, all documented):
+1. The price PUT payload must send amountMinor as a JSON number (the
+   validated DTO input form); BigInt values are the exact-assertion form
+   and cannot cross JSON. Fixed in the spec's provisioning helper.
+2. PUT /variants/:id/price returns 200 (NestJS @Put default; overwrite
+   upsert) â€” the spec initially expected 201; now accepts the documented
+   200/201 upsert envelope.
+3. DELETE /customers/:id returns 204 No Content (not 200); fixed in the
+   no-orders deletion test.
+The D1 P2003 production branch (customer.service.ts:186-203) was verified
+CORRECT AS IMPLEMENTED â€” no production change was needed.
+
+HISTORICAL TEST-COUNT DISCREPANCY (preserved, unchanged): CP5's entry
+still reads "645 tests"; the arithmetic truth is 631 (617 + 14). No tests
+were ever deleted. CP6's 631 remains the correct unit baseline (fresh run:
+631/631 across 44 suites). The CP5 entry stays as originally written per
+the no-history-rewrite rule.
+
+KNOWN PRE-EXISTING ISSUES (unchanged, out of scope):
+- src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+- Inventory concurrent-increment flakiness under parallel load (passes in
+  isolation; did not reproduce in U8's full-suite run).
+
+NEXT UNIT: U9 â€” Final Phase 3 verification (complete gate, progress-doc
+closure, HARD STOP for Phase 4 approval). NOT started; awaiting explicit
+user approval.
+
+HARD STOP â€” U8 complete; do not start U9 without explicit approval.
+
 
