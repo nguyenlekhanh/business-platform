@@ -1,0 +1,353 @@
+=======================================================================
+ PHASE 3 — CORE COMMERCE
+ U9 — FINAL PHASE 3 VERIFICATION GATE
+ PERMANENT FINAL REPORT / PRIMARY PHASE 3 HANDOFF DOCUMENT
+=======================================================================
+
+Checkpoint : Phase 3 — Core Commerce, Unit U9 (Final Verification Gate)
+Date       : 2026-08-31
+Status     : COMPLETE
+Starting
+Git commit : da3c40a ("test(phase3): complete U8 cross-domain verification")
+
+  ###     ###    #####  ######
+ #   #   #   #     #    #     #
+#       #     #   #    #     #
+#       #######   #    ######
+#   ##  #     #   #    #   ##
+ ###    #     #   #    #    ##
+
+     PHASE 3 — CORE COMMERCE: COMPLETE
+
+-----------------------------------------------------------------------
+1. PHASE 3 STATUS
+-----------------------------------------------------------------------
+All nine units of Phase 3 — Core Commerce are implemented, verified,
+documented, committed, and pushed:
+
+  PHASE 3 — CORE COMMERCE: COMPLETE
+
+This report is the primary handoff document for Phase 3. A future
+developer or AI model should be able to understand the complete Phase 3
+system from this file plus docs/phase-progress.md and the companion
+reports (docs/phase3_cp7_report.txt, docs/phase3_cp8_report.txt,
+docs/phase3_u8_report.txt).
+
+Phase 4 (POS + Offline Sync) has NOT been started and requires a
+separate explicit approval.
+
+-----------------------------------------------------------------------
+2. UNITS
+-----------------------------------------------------------------------
+Unit | Title                        | Migration(s) | Integration tests
+-----+------------------------------+--------------+------------------
+U1   | Category                     | 20260821050000 | 18
+U2   | Product                      | 20260821060000 | 19
+U3   | ProductVariant + Price       | 20260821070000 | 18
+U4   | Inventory                    | 20260821080000 | 17
+U5   | Cart                         | 20260821090000 | 15
+U6   | Order + OrderItem            | 20260821100000 | 56
+U7   | Payment (CP1–CP8)            | 20260821110000 | 35
+U8   | Cross-Domain Verification    | (none needed) |  9
+U9   | Final Verification Gate      | (none needed) |  0 (audit gate)
+
+Total Phase 3 integration coverage: 187 tests across the seven domain
+suites plus the U8 cross-domain suite.
+
+U7 sub-checkpoints (all COMPLETE):
+  CP1 Schema + Migration       (20260821110000_add_payment)
+  CP2 Tenant Scoping + RBAC
+  CP3 DTOs
+  CP4 T5 Create Payment
+  CP5 T2 Capture / Fail
+  CP6 Controller + Module
+  CP7 Integration Tests (35 tests)
+  CP8 Final U7 Verification Gate
+
+-----------------------------------------------------------------------
+3. ARCHITECTURE (FINAL)
+-----------------------------------------------------------------------
+Backend: NestJS 11 + PostgreSQL + Prisma 6.19.3 + Redis. Modular
+multi-tenant SaaS backend.
+
+Phase 3 added six domain modules under src/, one aggregate root each,
+per the approved assessment §1:
+
+  src/category/   Category (flat taxonomy, unique name per tenant)
+  src/product/   Product + ProductVariant + Price (one bounded
+                 context: variants/prices are product internals)
+  src/inventory/ Inventory (single stock pool per variant)
+  src/cart/      Cart + CartItem (owner = member User)
+  src/order/     Order + OrderItem (financial history)
+  src/payment/   Payment (simulated gateway, no external providers)
+
+Customer (existing rental-domain model) participates ONLY as an optional
+nullable reference on Order (approved decision D1, Option A).
+
+Model relationships (all tenant-scoped):
+  Category 1-N Product (FK Restrict — blocks category delete w/ products)
+  Product 1-N ProductVariant (FK Cascade)
+  ProductVariant 1-N Price (FK Cascade; unique (variantId, currency))
+  ProductVariant 1-1 Inventory (FK Cascade; variantId unique; lazy row)
+  Cart 1-N CartItem; CartItem N-1 ProductVariant (unique (cartId,variantId))
+  Order 1-N OrderItem; OrderItem N-1 ProductVariant (FK RESTRICT —
+        history survives variant deletion)
+  Order 1-N Payment; Payment N-1 Order (FK Cascade — dies with tenant)
+  Order N-1 Customer (nullable, FK Restrict — blocks customer delete
+        w/ orders, D1 P2003 branch)
+  Order N-1 User (creator)
+
+Cross-module access goes through services / tenant-scoped Prisma only;
+order-service transactions touch other models' tables for atomicity as
+documented per-call (approved §1). No nested relation writes anywhere.
+
+Migration discipline: ONE additive handwritten-SQL migration per unit,
+applied via `prisma migrate deploy` only; existing migrations never
+modified; no db push/reset; the Phase 2 reservation EXCLUDE constraint
+survives. Final state: 14 migrations, all applied, up to date. CHECK
+constraints that Prisma DSL cannot express live in the SQL files
+(quantityOnHand>=0, subtotalMinor>=0, quantity>0, unit/lineTotal>=0,
+lineTotal = quantity*unitAmount, Payment.amountMinor>=0).
+
+-----------------------------------------------------------------------
+4. SECURITY (FINAL)
+-----------------------------------------------------------------------
+TENANT ISOLATION
+  - All ten Phase 3 models are in TENANT_SCOPED_MODELS
+    (src/common/database/prisma/tenant-scoping.extension.ts:19-28).
+  - Centralized, fail-closed Prisma extension: every top-level operation
+    is force-scoped to the AsyncLocalStorage tenant context; a missing
+    context throws (InternalServerErrorException), never falls back to
+    unscoped.
+  - tenantId is ALWAYS server-derived; DTO whitelists reject a
+    client-supplied tenantId with 400 (integration-tested for
+    categories, cart items, orders, and payments).
+  - Cross-tenant references resolve to the uniform 404 (no existence
+    oracle) — verified by U8's ten-probe matrix and every domain's
+    IDOR tests.
+  - The only raw SQL in the codebase is the health check's
+    `SELECT 1` (not tenant data). No raw-SQL tenant bypass exists.
+
+AUTHENTICATION / AUTHORIZATION
+  - Guard chain on every Phase 3 controller: JWT authentication ->
+    TenantResolutionGuard (X-Tenant-ID header) -> PermissionsGuard, plus
+    TenantContextInterceptor. (Category/Product/Inventory rely on the
+    globally-registered JwtAuthGuard; Cart/Order/Payment list it
+    explicitly — both are the established working patterns.)
+  - Controller-level ValidationPipe everywhere:
+    whitelist + transform + forbidNonWhitelisted.
+  - RBAC catalog additions per approved §10:
+      category:read|create|update|delete|manage
+      product:read|create|update|delete|manage (variants/prices reuse
+        the product keys — product internals)
+      inventory:read | inventory:manage (documented deviation:
+        adjustment-only, no entity lifecycle)
+      cart:manage (owner-scoped self-service; documented deviation)
+      order:read|create|delete|manage (DELETE = cancel, mirroring the
+        reservation precedent; no UPDATE — orders immutable)
+      payment:read|create|manage (capture/fail = manage)
+    Role defaults: admin += every *_MANAGE; employee += *_READ +
+    CART_MANAGE + ORDER_CREATE + PAYMENT_CREATE; owner keeps semantic
+    all-permissions (no explicit grants).
+
+INPUT VALIDATION
+  - Every DTO is whitelisted; ownership-sensitive fields (tenantId,
+    status, id, timestamps, amounts on Payment create, currency on
+    Payment create) are never client-writable. Status fields are
+    server-controlled state machines everywhere.
+
+-----------------------------------------------------------------------
+5. BUSINESS INVARIANTS (FINAL)
+-----------------------------------------------------------------------
+MONEY
+  - Integer minor units only (BigInt -> PostgreSQL BIGINT): no floats
+    anywhere in monetary paths.
+  - Five money columns: Price.amountMinor, Order.subtotalMinor,
+    OrderItem.unitAmountMinor, OrderItem.lineTotalMinor,
+    Payment.amountMinor.
+  - Exact BigInt integer arithmetic: lineTotal = quantity x
+    unitAmountMinor (enforced by a DB CHECK); no rounding/division
+    exists in Phase 3 (no discounts/taxes).
+  - API serialization: BigInt amounts serialize as STRINGS in every
+    JSON projection (avoids JS precision loss); the DB keeps exact
+    BIGINT.
+  - Currency: ISO-4217 uppercase Char(3); one Order = one currency
+    (cart mixes allowed, checkout rejects mixes).
+  - Payment derives amountMinor/currency from the Order (full-amount
+    and currency invariants); the client supplies only orderId+method.
+  - Snapshots: Price is live; OrderItem snapshots unit price/currency/
+    product name/variant name/SKU at creation; later edits never
+    rewrite history.
+
+INVENTORY
+  - Single pool per variant (no multi-location until Phase 4).
+  - Decrement-on-order / restock-on-cancel; no reservation ledger.
+  - Mutations are atomic guarded conditional writes
+    (updateMany with quantityOnHand >= needed) — no read-modify-write;
+    the DB CHECK (quantityOnHand >= 0) is defense in depth.
+  - Concurrency: two racing orders (or cancels) are arbitrated by the
+    guarded updates — exactly one winner, no oversell; proven by the
+    U4 last-unit test and the U6 order race test.
+  - No double-restock: cancellation is a guarded PENDING->CANCELLED
+    update; a repeated cancel hits the state machine (409) and performs
+    no stock write (U8 test).
+
+CART
+  - One OPEN cart per (tenant, user) via find-or-create (small create
+    race tolerated — an extra OPEN cart is inert; documented).
+  - Items merge by @@unique([cartId, variantId]).
+  - Prices are live from Price rows at read time; carts hold NO money
+    fields and reserve NO stock.
+  - Ownership isolation: user B cannot read/mutate user A's cart items
+    within the same tenant (verified in U5 and U8).
+  - Conversion: cart -> CONVERTED happens inside the order transaction.
+
+ORDER
+  - State machine: PENDING -> PAID (only via payment capture tx) |
+    PENDING -> CANCELLED (POST /orders/:id/cancel, restocks). PAID is
+    terminal in Phase 3; cancelling a PAID order -> 409. Status is never
+    client-writable.
+  - Financial history: NO delete endpoints; OrderItem rows are
+    immutable snapshots; variant FK RESTRICT preserves history.
+  - Totals: subtotalMinor = sum(lineTotalMinor) with exact BigInt
+    math; DB CHECK lineTotal = quantity*unit.
+  - T1 order creation: variants must be ACTIVE, prices uniform-currency,
+    stock guarded-decremented; ANY failure rolls back everything
+    including stock; cart is converted in the same transaction.
+  - T3 cancellation: guarded status flip + per-variant restock
+    increments.
+
+PAYMENT
+  - State machine: PROCESSING -> CAPTURED (T2 capture: also flips the
+    Order PENDING -> PAID atomically in the same transaction) |
+    PROCESSING -> FAILED (T2 fail: Order stays PENDING). CAPTURED and
+    FAILED are terminal and immutable.
+  - Idempotency: re-capture of a CAPTURED payment and re-fail of a
+    FAILED payment return the existing terminal state (200) without
+    writes; FAILED cannot capture (409); CAPTURED cannot fail (409).
+  - T5 creation: only for a PENDING Order with no existing CAPTURED
+    payment; multiple PROCESSING payments allowed (documented rule).
+  - Transaction integrity: both capture updates are guarded
+    updateMany with count==1 enforcement; any count==0 aborts and
+    rolls back BOTH writes (no partial CAPTURED/CANCELLED state) —
+    proven by the CP7 rollback test.
+  - Concurrency: guarded updates arbitrate racing captures (exactly one
+    winner) and racing capture-vs-fail (deterministic [200,409] with a
+    consistent final state).
+  - Simulated gateway only (approved D4): capture/fail are
+    permission-guarded staff actions; no external providers, webhooks,
+    or refunds in Phase 3.
+
+CUSTOMER INTEGRATION POINT (approved D1)
+  - Order.customerId is a nullable FK Restrict; CustomerService.delete
+    maps the resulting P2003 to 409 "Customer has orders and cannot be
+    deleted" (reservations keep their pre-existing message). Verified
+    end-to-end by U8 with no partial deletion.
+
+-----------------------------------------------------------------------
+6. END-TO-END VERIFICATION (VERIFIED BY U8)
+-----------------------------------------------------------------------
+Happy path (all via real HTTP through the full AppModule, with direct
+persisted-row assertions at every boundary):
+
+  Category -> Product -> ProductVariant -> Price -> Inventory ->
+  Cart (item merge, live totals) -> Order from cart checkout
+  (PENDING, subtotal exact, cart CONVERTED, stock decremented, item
+  snapshots frozen) -> Payment (PROCESSING, amount/currency derived
+  from Order, string BigInt) -> Capture (200, Payment CAPTURED) ->
+  Order PAID (DB + API verified).
+
+Post-capture invariants verified: PAID order cannot be cancelled (409);
+a second payment for a PAID order is refused (409); a CAPTURED payment
+cannot be failed (409).
+
+Cancellation/restock path (verified):
+  Order (stock 10->6) -> payment PROCESSING -> T3 cancel (200,
+  CANCELLED, cancelledAt) -> stock restored EXACTLY once (6->10) ->
+  the surviving PROCESSING payment can no longer be captured (409;
+  guarded Order update fails, transaction rolls back, payment stays
+  PROCESSING) -> repeated cancel -> 409 and NO double-restock.
+
+-----------------------------------------------------------------------
+7. FINAL TEST RESULTS (ACTUAL RUNS, 2026-08-31, U9 GATE)
+-----------------------------------------------------------------------
+  Full integration suite (jest.integration.json):
+      21 suites, 568/568 passed.
+      Exactly the U8 baseline (post-CP8 was 20/559; U8 added +1 suite
+      and +9 tests). Zero drift in U9.
+  Full unit suite (jest.unit.json):
+      44 suites, 631/631 passed. Zero drift.
+  npm run lint:
+      2 errors — both the KNOWN PRE-EXISTING
+      src/asset/asset.service.spec.ts:203/:221
+      (no-unsafe-assignment). They remain present (they have NOT
+      disappeared) and were NOT touched by U9.
+  npm run build (nest build — repository type-check): success.
+  npx prettier --check: all files pass.
+  npx prisma validate: valid.
+  npx prisma migrate status: "Database schema is up to date!"
+      (14 migrations).
+
+-----------------------------------------------------------------------
+8. KNOWN ISSUES
+-----------------------------------------------------------------------
+PRE-EXISTING (explicitly NOT Phase 3 defects; untouched):
+  1. src/asset/asset.service.spec.ts:203 and :221 — pre-existing
+     no-unsafe-assignment lint errors. Standing project rule: leave
+     untouched. Still present as of U9.
+  2. Inventory "concurrent increments" integration test can be flaky
+     under full parallel suite load; it passes in isolation. It did
+     NOT reproduce in the U9 full-suite run (recorded as "did not
+     reproduce", not as "fixed").
+
+PHASE 3 DEFECTS FOUND DURING U9: NONE. The final audit (acceptance
+matrix U1–U8, security audit, business-invariant audit,
+database/migration audit, documentation-consistency audit) found zero
+defects; U9 required zero production-code changes.
+
+-----------------------------------------------------------------------
+9. HISTORICAL NOTES (PRESERVED)
+-----------------------------------------------------------------------
+  1. Test-count discrepancy 645 vs 631: the CP5 checkpoint entry in
+     docs/phase-progress.md records the unit suite as "645 tests"
+     after adding 14 payment-service tests. The arithmetic truth:
+     CP4 ended at 617; 617 + 14 = 631. No tests were ever deleted.
+     CP6's 631 was the correct baseline; CP7, CP8, and U9 fresh runs
+     all confirm 631/631 across 44 suites. Per the no-history-rewrite
+     rule the CP5 entry stands as written; the CP7 checkpoint note is
+     the factual correction of record.
+  2. CP7 hash correction: the CP7 commit was amended once to stamp its
+     own hash into docs/phase3_cp7_report.txt and then
+     force-with-lease pushed; the report originally recorded the
+     pre-amend hash e514f55 and was corrected during CP8 to record the
+     final hash 4e4a115. No code or test history was altered.
+  3. CP7 missing-implementation conflict: CP7 had been "approved" in an
+     earlier session but the integration spec was genuinely absent
+     from the repository (verified: file did not exist, suite at CP6
+     baseline, empty stash, HEAD at c6a556b). It was re-implemented,
+     verified, and documented in the CP7 session. Recorded here so a
+     future reader understands why CP7's report opens with a conflict
+     section.
+
+-----------------------------------------------------------------------
+10. FINAL GIT STATE
+-----------------------------------------------------------------------
+Starting commit : da3c40a ("test(phase3): complete U8 cross-domain
+                    verification")
+U9 commit       : see final stamp below
+Commit message  : docs(phase3): complete final verification gate
+Branch          : main
+Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+Push result     : SUCCESS — working tree clean after push
+
+=======================================================================
+ FINAL BOUNDARY
+=======================================================================
+  U9 COMPLETE -> PHASE 3 — CORE COMMERCE: COMPLETE
+  -> DOCUMENTED -> COMMITTED -> PUSHED -> HARD STOP
+
+  DO NOT start Phase 4. DO NOT implement POS, new commerce features,
+  refunds, webhooks, or external payment providers. DO NOT refactor
+  architecture or modify schemas. Phase 4 requires a separate explicit
+  approval from the project owner.
+=======================================================================

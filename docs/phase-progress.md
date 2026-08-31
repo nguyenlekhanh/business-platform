@@ -2755,3 +2755,123 @@ user approval.
 HARD STOP â€” U8 complete; do not start U9 without explicit approval.
 
 
+
+---
+
+## U9 FINAL PHASE 3 VERIFICATION â€” COMPLETE (2026-08-31)
+
+STATUS: **U9 = COMPLETE. PHASE 3 â€” CORE COMMERCE = COMPLETE.**
+U9 was the final release/verification gate: documentation-only, ZERO
+production-code, schema, migration, or test changes (and none needed).
+The complete Phase 3 system (U1â€“U8) was re-audited against the repository,
+the full regression gate was re-run, and the documentation was checked for
+consistency. HARD STOP for Phase 4 approval follows this checkpoint.
+
+FINAL ACCEPTANCE MATRIX (verified against actual repository, not just docs):
+- U1 Category: migration 20260821050000; CRUD+PATCH+keyset pagination+RBAC
+  category:read/create/update/delete/manage; tenant isolation + IDOR;
+  18 integration tests. VERIFIED.
+- U2 Product: migration 20260821060000 (Category FK Restrict); status/
+  categoryId filters; archive; product:* five-key RBAC; P2003->409 on
+  category delete; 19 integration tests. VERIFIED.
+- U3 ProductVariant + Price: migration 20260821070000; nested list/create
+  under product + flat PATCH/DELETE; PUT price upsert (variantId,currency)
+  unique, overwrite-no-history; BigInt strings; 18 integration tests.
+  VERIFIED.
+- U4 Inventory: migration 20260821080000; single pool per variant
+  (variantId @unique); lazy row (missing==0); atomic guarded updateMany
+  (gte -delta); DB CHECK quantityOnHand>=0; last-unit concurrency test;
+  17 integration tests. VERIFIED.
+- U5 Cart: migration 20260821090000; one OPEN cart per (tenant,user)
+  find-or-create with P2002 race tolerance; item merge by (cartId,variantId);
+  live Price totals (no money fields, no stock reservation); ownership
+  isolation; 15 integration tests. VERIFIED.
+- U6 Order + OrderItem: migration 20260821100000; T1 (validate variants
+  ACTIVE + uniform currency + guarded stock decrement + Order + top-level
+  OrderItems + cart CONVERTED, full rollback); T3 (guarded cancel +
+  restock); immutable snapshots; lineTotal = qty*unit CHECK; 56
+  integration tests. VERIFIED.
+- U7 Payment (CP1â€“CP8): migration 20260821110000; PaymentStatus
+  PROCESSING/CAPTURED/FAILED; T5 create (Order PENDING + no CAPTURED
+  payment; amount/currency derived from Order); T2 capture (atomic guarded
+  PROCESSING->CAPTURED + PENDING->PAID); T2 fail (Order untouched);
+  idempotent terminal states; CHECK amountMinor>=0; 35 integration tests.
+  VERIFIED.
+- U8 Cross-domain: customer-with-orders delete 409 (D1 P2003 branch),
+  E2E flow category->...->payment->capture->PAID with persisted-state
+  checks at every boundary, cancel/restock exactly-once + no
+  double-restock, cross-tenant uniform-404 probes, tenantId injection
+  400s, owner semantic-all E2E; 9 integration tests. VERIFIED.
+- U9 (this gate): final security/business-invariant/database audit +
+  full regression re-run. VERIFIED.
+
+FINAL SECURITY AUDIT (read-only; all verified in code):
+- Tenant isolation: all TEN Phase 3 models in TENANT_SCOPED_MODELS
+  (tenant-scoping.extension.ts:19-28); fail-closed AsyncLocalStorage
+  context; server-derived tenantId only; uniform cross-tenant 404 (no
+  existence oracle); tenantId payload injection rejected 400 by every
+  whitelist; the only raw SQL in the codebase is the health check's
+  SELECT 1 (not tenant data).
+- Guard chain on every Phase 3 controller: JWT auth -> tenant resolution
+  (X-Tenant-ID) -> permissions + TenantContextInterceptor; controller-level
+  ValidationPipe whitelist+transform+forbidNonWhitelisted present on all
+  seven Phase 3 controllers.
+- RBAC: category/product five-key patterns; inventory:read/manage and
+  cart:manage documented deviations; order:read/create/delete(cancel)/
+  manage; payment:read/create/manage; admin += *_MANAGE, employee +=
+  *_READ/CART_MANAGE/ORDER_CREATE/PAYMENT_CREATE; owner semantic-all.
+
+FINAL BUSINESS-INVARIANT AUDIT (all verified, none changed):
+- Money: integer minor units only; 5 BigInt columns (Price.amountMinor,
+  Order.subtotalMinor, OrderItem.unitAmountMinor/lineTotalMinor,
+  Payment.amountMinor); exact BigInt math; strings at the API boundary;
+  no floats anywhere; one currency per order; Payment derives
+  amount/currency from Order.
+- Inventory: negative impossible (guarded update + DB CHECK);
+  decrement-on-order/restock-on-cancel; concurrency arbitration; no
+  double-restock (guarded cancel + U8 test).
+- Cart: tenant/user ownership; (cartId,variantId) merge; live pricing; no
+  stock reservation pre-order.
+- Order: PENDING->PAID|CANCELLED, PAID terminal; status never
+  client-writable; immutable snapshots; exact totals; cancel restocks.
+- Payment: PROCESSING->CAPTURED|FAILED terminal+immutable; guarded
+  atomic T2; idempotency; capture flips Order to PAID; fail leaves
+  PENDING.
+
+DATABASE/MIGRATION AUDIT: schema valid; 14 migrations applied, up to date,
+history coherent (20260821050000..20260821110000 = the six Phase 3
+additive migrations, all present and applied); CHECK constraints
+(quantityOnHand>=0, subtotalMinor>=0, quantity>0, unitAmount>=0,
+lineTotal>=0, lineTotal=qty*unit, amountMinor>=0) live in handwritten SQL;
+FK/cascade behavior matches docs; no uncommitted schema drift.
+
+FINAL REGRESSION RESULTS (exact, actual runs, 2026-08-31):
+- Full integration suite (jest.integration.json): 21 suites, 568/568
+  passed â€” EXACTLY the U8 baseline; zero drift.
+- Full unit suite (jest.unit.json): 44 suites, 631/631 passed â€” EXACTLY
+  the baseline; zero drift.
+- npm run lint: 2 problems â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment). Zero
+  new issues. (These errors remain present; they have NOT disappeared
+  and were NOT fixed by U9.)
+- npm run build (nest build): success.
+- npx prettier --check: all files pass.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (14 migrations).
+- The pre-existing inventory concurrent-increment flakiness did NOT
+  reproduce in this run (recorded as "did not reproduce", not "fixed").
+
+DOCUMENTATION CONSISTENCY AUDIT: U1â€“U8 statuses match the repository;
+CP7/CP8 history intact (including the e514f55->4e4a115 hash-correction
+record); U8 history intact; all HARD STOP boundaries preserved; the
+historical 645-vs-631 discrepancy remains documented (CP5 entry
+as-written + CP7 corrective note); no documentation claims work that
+does not exist.
+
+PHASE 3 FINAL STATE: U1â€“U9 COMPLETE. Next: HARD STOP for Phase 4 (POS +
+Offline Sync) approval. Do NOT start Phase 4, POS, refunds, webhooks,
+external payment providers, new commerce features, or any refactor
+without separate explicit approval.
+
+HARD STOP â€” Phase 3 â€” Core Commerce COMPLETE via U9.
+
