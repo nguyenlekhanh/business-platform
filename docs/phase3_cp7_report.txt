@@ -1,0 +1,257 @@
+=======================================================================
+ PHASE 3 — CORE COMMERCE
+ U7 CP7 — PAYMENT INTEGRATION TESTS
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 3 — Core Commerce, Unit U7 Payment, Checkpoint CP7
+            (Integration Tests)
+Date       : 2026-08-30
+Status     : COMPLETE — implemented, verified, documented, committed, pushed
+
+-----------------------------------------------------------------------
+1. ORIGINAL CONFLICT (DO NOT HIDE THIS HISTORY)
+-----------------------------------------------------------------------
+CP7 had previously been approved by the project owner, but when the
+repository was re-read at the start of this session, the CP7
+implementation was genuinely MISSING. No integration test file for the
+Payment domain existed anywhere in the codebase.
+
+Evidence recorded before re-implementation:
+  - src/payment/payment.integration.spec.ts DID NOT EXIST.
+  - The integration suite was at the CP6 baseline: 19 suites / 524 tests.
+  - The last relevant commit was c6a556b ("feat(payment): implement
+    controller and module", CP6).
+  - `git stash list` was empty; there was no hidden or shelved CP7 work.
+  - docs/phase-progress.md ended at the CP6 checkpoint with its
+    "do not start CP7 without explicit approval" HARD STOP.
+
+The project owner investigated, confirmed the conflict, and authorized
+re-implementation of CP7 in this session. This report therefore documents
+a fresh, verifiable CP7 implementation — the earlier "approved" CP7 never
+reached the repository.
+
+-----------------------------------------------------------------------
+2. IMPLEMENTATION
+-----------------------------------------------------------------------
+CP7 added ONE new file: a full HTTP-level integration suite for the
+Payment domain, executing real supertest requests through the complete
+AppModule against the real PostgreSQL database (no mocks for anything
+under test), exactly mirroring the established architecture of
+src/order/order.integration.spec.ts:
+
+  - AppModule + supertest harness (app.getHttpServer()).
+  - Fresh tenantA/tenantB fixtures per test (beforeEach), with cuid-free
+    run-unique slugs/emails/SKUs so repeated runs never collide.
+  - Role fixtures granted payment:read / payment:create / payment:manage
+    (plus order permissions) via the real RolePermission tables.
+  - JWTs signed directly with JwtService ({ sub: userId }) and the
+    X-Tenant-ID header, matching every other Phase 3 suite.
+  - afterAll cleanup deleting payment rows first (payment -> order ->
+    cart -> ... -> tenant) with the established swallowed-catch pattern.
+
+No production code, schema, migrations, DTOs, controllers, services, or
+modules were modified by CP7. The tests exercise the CP1–CP6
+implementation exactly as approved.
+
+-----------------------------------------------------------------------
+3. FILES CHANGED
+-----------------------------------------------------------------------
+Created:
+  - src/payment/payment.integration.spec.ts   (35 tests, 8 describe blocks)
+
+Modified (documentation only):
+  - docs/phase-progress.md                    (CP7 checkpoint appended)
+
+-----------------------------------------------------------------------
+4. TEST COVERAGE (35 TESTS)
+-----------------------------------------------------------------------
+
+AUTHENTICATION / AUTHORIZATION (7 tests)
+  - 401 for unauthenticated requests on all four endpoints:
+    POST /payments, GET /payments/:id, POST /payments/:id/capture,
+    POST /payments/:id/fail.
+  - 403 for an authenticated user with no tenant membership.
+  - 403 without payment:read (GET), payment:create (POST),
+    payment:manage (capture and fail).
+  - Manage-only role: can capture (200) but cannot read (403) or
+    create (403).
+  - Employee semantics: can create orders and payments but receives
+    403 on payment read, capture, and fail.
+  - Owner semantic-all: full payment lifecycle without explicit grants,
+    including verification that the Order flips to PAID after capture.
+
+TENANT ISOLATION / IDOR (5 tests)
+  - Cross-tenant Payment GET returns the uniform 404 "Payment not
+    found" while the same-tenant read of the same payment succeeds
+    (no existence oracle).
+  - Cross-tenant Order reference in POST /payments returns 404
+    "Order not found".
+  - Cross-tenant capture and cross-tenant fail both return 404 AND
+    leave tenant B's Payment/Order rows untouched (verified directly
+    in the database under tenant B's context).
+  - Centralized tenant-scoping extension is proven active: the same
+    prisma.payment.findUnique resolves inside tenant A's context and
+    returns null inside tenant B's context.
+  - Client-supplied tenantId in the create payload is rejected with 400
+    by the whitelist (covered in the DTO-validation block).
+
+DTO VALIDATION (2 tests)
+  - Missing/empty orderId, missing/empty method, method exceeding
+    MaxLength(50), non-string method -> 400.
+  - Injection of tenantId, amountMinor, currency, status, id, createdAt,
+    and unknown fields -> 400 (whitelist + forbidNonWhitelisted).
+
+T5 — CREATE PAYMENT (2 invariant tests)
+  - amountMinor equals the Order's subtotalMinor and currency equals the
+    Order's currency; status is always PROCESSING; amountMinor is
+    serialized as a JSON string (typeof 'string' asserted).
+  - EUR fixture: a variant priced in EUR produces an EUR order and an
+    EUR payment with the exact derived amount.
+
+T5 — REJECTIONS AND DUPLICATE RULES (4 tests)
+  - Unknown Order -> 404.
+  - Foreign (tenant B) Order -> 404.
+  - Non-PENDING (cancelled) Order -> 409 "Order is not pending".
+  - Order with an existing CAPTURED payment -> 409 (either documented
+    message — see section 8 note 2).
+  - Multiple PROCESSING payments for one Order remain allowed (documented
+    business rule): two payments created, both rows PROCESSING.
+
+GET PAYMENT (3 tests)
+  - Correct response shape with string BigInt amount.
+  - Unknown payment -> 404.
+  - Cross-tenant payment -> 404 while same-tenant access works.
+
+T2 — CAPTURE (6 tests)
+  - PROCESSING -> CAPTURED and Order PENDING -> PAID, verified both via
+    the API and directly in the database (BigInt column intact:
+    amountMinor = 2000n).
+  - Transaction rollback: Order cancelled while the payment is
+    PROCESSING, then capture -> 409 and the Payment update is rolled
+    back (Payment remains PROCESSING; no partial CAPTURED/CANCELLED
+    state ever exists).
+  - FAILED payment cannot be captured (409, both rows unchanged).
+  - Idempotent re-capture: second capture returns 200 CAPTURED with no
+    further state changes.
+  - Unknown payment capture -> 404.
+  - Cross-tenant capture -> 404, tenant B state untouched.
+
+T2 — FAIL (5 tests)
+  - PROCESSING -> FAILED with the Order remaining PENDING (API + direct
+    database row verification).
+  - CAPTURED payment cannot be failed (409, both rows unchanged).
+  - Idempotent re-fail: second fail returns 200 FAILED, no changes.
+  - Unknown payment fail -> 404.
+  - Cross-tenant fail -> 404, tenant B state untouched.
+
+CONCURRENCY / ATOMICITY (3 tests, real — no mocks, no sleeps)
+  - Two concurrent captures of the same PROCESSING payment: exactly one
+    guarded updateMany wins; responses are only 200/409; final database
+    state is CAPTURED payment + PAID order.
+  - Concurrent capture vs fail on the same payment: deterministic
+    [200, 409] outcome; final state is consistent (either
+    CAPTURED+PAID or FAILED+PENDING — never both transitions applied).
+  - Two concurrent payment creations for one PENDING order: both 201,
+    two PROCESSING rows with distinct methods (documented T5 rule).
+
+MONEY / SERIALIZATION
+  - Every payment JSON response asserts amountMinor is a string.
+  - Database rows assert the raw BigInt values remain exact.
+
+-----------------------------------------------------------------------
+5. VERIFICATION RESULTS (ACTUAL RUNS)
+-----------------------------------------------------------------------
+Focused Payment integration suite:
+  1 suite, 35/35 passed.
+
+Full integration suite (jest.integration.json):
+  20 suites, 559/559 passed.
+  (CP6 baseline was 19 suites / 524 tests; CP7 adds exactly +1 suite
+  and +35 tests; every pre-existing suite unchanged and green.)
+
+Full unit suite (jest.unit.json):
+  44 suites, 631/631 passed (unchanged by CP7).
+
+Lint (npm run lint):
+  2 problems — both the KNOWN PRE-EXISTING
+  src/asset/asset.service.spec.ts:203 and :221 no-unsafe-assignment
+  errors. Zero new issues from CP7. (Twelve prettier formatting errors
+  in the brand-new spec were auto-fixed with the project formatter
+  before these results were recorded.)
+
+Type-check / build (npm run build — the repository's established
+type-check gate): success.
+
+Prisma: schema valid; migrate status "Database schema is up to date!"
+(14 migrations). No schema or migration changes were made in CP7.
+
+-----------------------------------------------------------------------
+6. KNOWN PRE-EXISTING ISSUES (SEPARATE FROM CP7)
+-----------------------------------------------------------------------
+  - src/asset/asset.service.spec.ts:203 and :221 — pre-existing
+    no-unsafe-assignment lint errors. Standing project rule: leave
+    untouched.
+  - src/inventory inventory integration "concurrent increments" test
+    can be flaky when the full integration suite runs in parallel; it
+    passes in isolation. Pre-existing, unrelated to Payment/CP7, not
+    modified by CP7.
+
+-----------------------------------------------------------------------
+7. SECURITY VERIFICATION SUMMARY
+-----------------------------------------------------------------------
+  - Centralized fail-closed tenant scoping (Prisma extension) is
+    actively exercised: same payment visible under tenant A context,
+    null under tenant B context; all cross-tenant HTTP access paths
+    return the uniform 404.
+  - RBAC: payment:read / payment:create / payment:manage enforced per
+    endpoint; employee/admin/owner semantics verified; manage-only role
+    write-without-read verified.
+  - IDOR: cross-tenant Payment and Order references produce 404 with no
+    existence oracle; failed cross-tenant mutations leave the owning
+    tenant's data untouched.
+  - Client-supplied tenantId (and every other injected field) is
+    rejected with 400 before any business logic executes.
+
+-----------------------------------------------------------------------
+8. BUSINESS INVARIANTS VERIFIED
+-----------------------------------------------------------------------
+  - Payment.amountMinor === Order.subtotalMinor (full-amount invariant).
+  - Payment.currency === Order.currency (currency invariant).
+  - Payment status is server-controlled and starts at PROCESSING.
+  - T2 capture is atomic: Payment PROCESSING->CAPTURED and Order
+    PENDING->PAID commit together or not at all; a failed guarded
+    update rolls back the entire transaction.
+  - T2 fail never modifies the Order (stays PENDING).
+  - Terminal states are immutable: FAILED cannot capture, CAPTURED
+    cannot fail; re-invocations are idempotent-success.
+  - Concurrent transitions are arbitrated by guarded updateMany:
+    exactly one winner, no corrupted intermediate states.
+  - BigInt money is serialized as strings in every JSON response while
+    the database retains exact BIGINT values.
+
+-----------------------------------------------------------------------
+9. HISTORICAL TEST-COUNT DISCREPANCY (PRESERVED)
+-----------------------------------------------------------------------
+The CP5 checkpoint entry in docs/phase-progress.md states the unit
+suite reached "645 tests" after adding 14 payment-service tests. That
+number is arithmetically wrong: CP4 ended at 617 unit tests;
+617 + 14 = 631. No tests were deleted at any point. CP6's recorded
+631 was the correct baseline, and this session's fresh run confirms
+631/631 across 44 suites. Per the project's no-history-rewrite rule,
+the CP5 entry was left as originally written; this note is the factual
+correction of record. CP7 adds integration tests only — the unit
+count remains 631.
+
+-----------------------------------------------------------------------
+10. GIT
+-----------------------------------------------------------------------
+(Recorded only after the operations succeeded — see below for the
+final values stamped at commit time.)
+
+  Commit hash     : e514f55
+  Commit message  : test(payment): complete U7 CP7 integration coverage
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS — c6a556b..e514f55 main -> main;
+                    working tree clean after push.

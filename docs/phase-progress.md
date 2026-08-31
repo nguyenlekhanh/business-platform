@@ -2448,3 +2448,114 @@ RBAC matrix, IDOR cross-tenant 404s, DTO validation, idempotent capture/fail,
 state machine, tenant isolation, capture rolls back on Order update failure.
 
 HARD STOP â€” U7 CP6 complete; do not start CP7 without explicit approval.
+
+---
+
+## U7 PAYMENT â€” CP7 INTEGRATION TESTS COMPLETE (2026-08-30)
+
+STATUS: U7 CP7 = COMPLETE (implemented, verified, documented).
+Scope delivered EXACTLY per approved U7 CP7: real HTTP + real database Payment
+integration coverage through the full AppModule (supertest), exercising the
+actual PaymentController endpoints, tenant-scoping extension, RBAC guards,
+and Prisma guarded-update transactions. NO business-logic, schema, or
+migration changes. Do NOT start CP8/U8/U9.
+
+ORIGINAL CONFLICT (documented, not hidden):
+- CP7 had previously been approved, but the implementation was genuinely
+  MISSING from the repository. Verified evidence at the start of this session:
+  src/payment/payment.integration.spec.ts did not exist; integration suite
+  was at the CP6 baseline (19 suites / 524 tests); last relevant commit was
+  c6a556b (CP6); git stash was empty. The user confirmed the conflict and
+  authorized re-implementation in this session.
+
+FILES CHANGED (1):
+- src/payment/payment.integration.spec.ts (NEW â€” 35 tests across 8 describe
+  blocks, mirroring the order.integration.spec.ts architecture)
+
+TEST COVERAGE (35 tests):
+- Authentication: 401 unauthenticated on all 4 endpoints; 403 for non-member
+  outsider; 403 without payment:read / payment:create / payment:manage;
+  manage-only role can capture but cannot read/create; employee can create
+  orders+payments but cannot read/capture/fail; owner semantic-all works.
+- Tenant isolation / IDOR: cross-tenant payment GET -> uniform 404 (no
+  existence oracle, same-tenant read works); cross-tenant Order reference on
+  create -> 404; cross-tenant capture and fail -> 404 with tenant B state
+  untouched; direct Prisma reads inside tenantB context return null
+  (proves the centralized extension scoping is actually exercised).
+- DTO validation: missing/empty orderId/method, method MaxLength(50), wrong
+  method type -> 400; injections of tenantId/amountMinor/currency/status/id/
+  createdAt/bogus -> 400 (whitelist + forbidNonWhitelisted).
+- T5 create: amountMinor === Order.subtotalMinor; currency === Order.currency
+  (incl. EUR fixture); method from DTO; status always PROCESSING; non-PENDING
+  (cancelled) Order -> 409; CAPTURED payment already exists -> 409 (either
+  documented 409 message â€” the service checks Order-PENDING first per CP4
+  check order); multiple PROCESSING payments for one Order remain allowed
+  (documented business rule).
+- T2 capture: PROCESSING->CAPTURED + Order PENDING->PAID atomically; DB rows
+  verified directly (BigInt column intact: amountMinor 2000n, currency USD);
+  FAILED cannot capture (409, state unchanged); idempotent re-capture returns
+  CAPTURED 200 without further changes; unknown payment -> 404; cross-tenant
+  -> 404.
+- T2 fail: PROCESSING->FAILED, Order stays PENDING (API + direct DB row
+  checks); CAPTURED cannot fail (409, state unchanged); idempotent re-fail
+  returns FAILED 200; unknown -> 404; cross-tenant -> 404.
+- Transaction rollback: order cancelled mid-PROCESSING then capture ->
+  guarded Order update matches 0 rows -> 409 and the Payment update ROLLS
+  BACK (Payment stays PROCESSING, no partial CAPTURED/CANCELLED state).
+- Concurrency (real, no mocks/sleeps): two concurrent captures -> exactly one
+  transition wins, final state CAPTURED + PAID; concurrent capture-vs-fail ->
+  deterministic [200, 409] with consistent final state (either CAPTURED+PAID
+  or FAILED+PENDING, never both); two concurrent creations -> both 201,
+  two PROCESSING rows with distinct methods.
+- BigInt/money serialization: amountMinor asserted to be typeof 'string' in
+  every payment JSON response.
+
+VERIFICATION RESULTS (exact, actual runs):
+- Focused Payment integration suite: 1 suite, 35/35 passed.
+- Full integration suite (jest.integration.json): 20 suites, 559/559 passed
+  (was 19 suites / 524 tests at CP6 baseline; +1 suite, +35 tests exactly;
+  every pre-existing suite unchanged and green).
+- Full unit suite (jest.unit.json): 44 suites, 631/631 passed (unchanged).
+- npm run format: clean; prettier --check passes.
+- npm run lint: 2 problems total â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221 (no-unsafe-assignment). Zero new
+  lint issues from CP7 (12 prettier errors in the new spec were auto-fixed
+  before recording results).
+- npm run build (nest build â€” the repository's type-check): success.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (14 migrations). No schema/migration changes in CP7.
+
+HISTORICAL TEST-COUNT DISCREPANCY (preserved, not rewritten):
+- CP5's checkpoint INCORRECTLY documented the unit suite as "645 tests".
+  The arithmetic truth: CP4 ended at 617 unit tests; CP5 added 14, giving 631.
+  No tests were ever deleted. CP6's recorded 631 was the correct baseline,
+  and this session's fresh unit run confirms 631/631 across 44 suites.
+  CP7 adds integration tests only; the unit count remains 631.
+  The CP5 entry above is left as originally written per the no-history-rewrite
+  rule; this note supersedes it factually.
+
+TEST-SIDE FINDINGS DURING CP7 (no production defects found):
+1. Helper callbacks passed to tenantContext.run() MUST be async so the
+   Prisma await happens INSIDE the AsyncLocalStorage context (extension
+   contract #6); non-async callbacks return lazily-awaited PrismaPromises
+   that fail closed. Fixed in the spec's DB-row verification helpers.
+2. The duplicate-CAPTURED 409 test initially expected the message 'Payment
+   already captured for this order', but after a capture the Order is PAID,
+   so the service's Order-PENDING check fires FIRST (CP4's documented check
+   order) and returns 'Order is not pending'. The test now accepts either
+   documented 409 message. Both guards remain in place; the duplicate-payment
+   guard is defense-in-depth for a state unreachable via the API (capture is
+   atomic).
+
+KNOWN PRE-EXISTING ISSUES (unchanged, out of scope):
+- src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+- Inventory concurrent-increment integration test can be flaky under full
+  parallel suite load; passes in isolation; unrelated to Payment/CP7.
+
+NEXT CHECKPOINT: CP8 â€” Final U7 Verification Gate
+Re-run the complete gate (format, lint, build, unit, integration, prisma
+validate, migrate status) and close out U7. NOT started; awaiting explicit
+user approval.
+
+HARD STOP â€” U7 CP7 complete; do not start CP8 without explicit approval.
+
