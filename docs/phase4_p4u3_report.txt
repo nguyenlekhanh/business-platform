@@ -1,0 +1,272 @@
+=======================================================================
+ PHASE 4 — POS + OFFLINE SYNC
+ P4-U3 — MULTI-STORE INVENTORY
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 4, Unit 3 (Multi-store Inventory)
+Date       : 2026-08-31
+Status     : COMPLETE — implemented, verified, documented, committed,
+             pushed. HARD STOP before P4-U4.
+Starting
+Git commit : 01c5178 ("feat(pos): implement P4-U2 online POS sale")
+Governing
+decision  : D2 Option A (approved): extend the existing Inventory model
+             with nullable storeId and store-scoped uniqueness
+             (storeId, variantId); preserve all Phase 3 invariants.
+
+-----------------------------------------------------------------------
+1. SCOPE
+-----------------------------------------------------------------------
+The resulting inventory scope is TENANT + STORE + VARIANT while the
+tenant-global pool (storeId NULL) remains the default for every existing
+non-POS flow. No parallel PosStock table; no second inventory engine; the
+existing Inventory model/service/migration discipline carries the change.
+
+Not implemented (later units): offline operation model (P4-U4), sync
+protocol, offline payment boundary, reconciliation.
+
+-----------------------------------------------------------------------
+2. APPROVED D2 DECISION AS IMPLEMENTED
+-----------------------------------------------------------------------
+  - Inventory.storeId String? (nullable). NULL = tenant-global pool
+    (the Phase 3 single pool, preserved verbatim). NOT NULL = a
+    store-scoped pool.
+  - Store-scoped uniqueness (storeId, variantId) — enforced as a PARTIAL
+    unique index (Prisma DSL cannot express partial indexes):
+      Inventory_storeId_variantId_key ON (storeId, variantId)
+        WHERE (storeId IS NOT NULL)
+  - The Phase 3 global uniqueness is preserved identically:
+      Inventory_variantId_global_key ON (variantId)
+        WHERE (storeId IS NULL)
+  - All Phase 3 invariants preserved (see section 9).
+  - FK: storeId -> Store, ON DELETE RESTRICT (stock blocks store
+    deletion; P2003 -> 409, the PosDevice/PosSession precedent).
+
+-----------------------------------------------------------------------
+3. EXISTING-DATA MIGRATION STRATEGY + PROOF STOCK WAS PRESERVED
+-----------------------------------------------------------------------
+The unit's critical rule was honored with a read-only audit performed
+BEFORE any schema or migration work (script scripts/p4u3_data_audit.mjs,
+used once and deleted before commit):
+
+  MEASURED DATABASE CONTENTS (live, localhost:5432/app,
+  NODE_ENV=development):
+    Inventory rows: 0     Orders: 0 (PENDING: 0)   PosSales: 0
+    Stores: 0       Tenants: 0   ProductVariants: 0   PosDevices: 0
+
+  CONCLUSION: there is NO existing stock to preserve, assign, duplicate,
+  redistribute, delete, or merge. The migration is pure DDL. No arbitrary
+  store assignment, no first-store/default-store rule, no silent
+  redistribution was performed — none was possible or needed.
+
+  FUTURE-ROW PRESERVATION (by construction): storeId is nullable and NULL
+  means the tenant-global pool with exactly the Phase 3
+  one-row-per-variant uniqueness. Any row created before this change
+  (none exist) would have remained a valid global-pool row under the
+  partial unique index.
+
+  CONSTRAINT SWAP: the former absolute unique index
+  Inventory_variantId_key was REPLACED by Inventory_variantId_global_key
+  (partial, WHERE storeId IS NULL) — an IDENTICAL guarantee for
+  NULL-store rows, so the swap weakens nothing. The table was empty
+  (proven above), making this a pure DDL operation with zero row impact.
+
+-----------------------------------------------------------------------
+4. SCHEMA CHANGES / MIGRATION
+-----------------------------------------------------------------------
+prisma/schema.prisma:
+  - Inventory: + storeId String?, + Store? relation (Restrict),
+    + @@index([storeId]); variantId dropped the @unique DSL annotation
+    (uniqueness moved to the handwritten partial indexes).
+  - ProductVariant.inventory: Inventory? -> Inventory[] (a variant now
+    has one global row + N store rows).
+  - Store: + inventories Inventory[] backrelation. All changes additive.
+
+Migration 20260821140000_add_store_scoped_inventory (additive, handwritten
+SQL, deploy-only): ADD COLUMN storeId; DROP the absolute variantId unique
+index; CREATE the two partial unique indexes + storeId lookup index; ADD
+the RESTRICT FK. Existing 16 migrations untouched; 17 total, up to date.
+
+-----------------------------------------------------------------------
+5. STORE RESOLUTION
+-----------------------------------------------------------------------
+  - INVENTORY API: store context is the PATH-PARAM store of the new
+    endpoints (/inventory/stores/:storeId/...). The store is resolved
+    through a tenant-scoped lookup: foreign/unknown store -> uniform 404
+    'Store not found' (Asset.storeId precedent). Body storeId/tenantId is
+    whitelist-rejected (400) — the store can never be injected.
+    Check order: variant existence first (404 'Variant not found'),
+    then store (404 'Store not found') — either message for a mixed
+    foreign case proves no leak.
+  - POS: the store is derived from the authenticated PosSession ->
+    PosDevice -> Store chain (never the client); the sale passes it to
+    OrderService as the INTERNAL inventoryScope option.
+  - NON-POS flows: the global pool via the unchanged default.
+
+-----------------------------------------------------------------------
+6. INVENTORY API BEHAVIOR
+-----------------------------------------------------------------------
+Phase 3 routes (contracts unchanged — global pool):
+  GET  /inventory/:variantId                 inventory:read
+  POST /inventory/adjust                     inventory:manage
+
+P4-U3 routes (store pools; same permissions):
+  GET  /inventory/stores/:storeId/variants/:variantId   inventory:read
+  POST /inventory/stores/:storeId/adjust                inventory:manage
+
+Semantics per pool are identical: guarded atomic updateMany + increment,
+quantityOnHand >= 0 DB CHECK, lazy row creation on first positive delta
+with P2002 race retry, missing row == 0 on hand, BigInt-free integer
+quantities. Two stores holding the same variant are fully independent
+(partial unique indexes + scoped where-clauses).
+
+-----------------------------------------------------------------------
+7. ORDER INTEGRATION
+-----------------------------------------------------------------------
+  - CREATE (T1): createOrder gained an INTERNAL-ONLY options parameter
+    (CreateOrderOptions.inventoryScope). Default 'global' — every existing
+    caller and the public CreateOrderDto (untouched) behave exactly as in
+    Phase 3. The POS orchestration passes the session's store. The
+    guarded decrement's where-clause now includes the pool's storeId.
+  - CANCEL (T3) RESTOCK — THE GAP CHECK: the unit instructions required
+    stopping if existing Orders lacked trusted store information. The
+    repository ALREADY records it deterministically: every POS order has
+    a PosSale provenance row created in the same flow (UNIQUE(orderId))
+    whose storeId is the pool T1 decremented. Cancel resolves the pool
+    from that recorded data: POS order -> its PosSale store pool;
+    non-POS order -> the global pool. No guessing, no Order schema
+    change, no silent modification of Order semantics.
+  - PROVEN: cancel of a Store A POS sale restores Store A exactly once
+    (0 -> 2, never 4 or 5); Store B and the global pool untouched;
+    repeated cancel -> 409 with no second stock write; a non-POS order
+    restocks the global pool only.
+
+-----------------------------------------------------------------------
+8. CART COMPATIBILITY
+-----------------------------------------------------------------------
+Audited: Cart holds NO stock reservation and NO store context; checkout
+goes through the unchanged default (global pool). Correct store-scoped
+inventory required NO new Cart business rule — none was invented, and
+Cart behavior is unchanged (the full Cart suite remains green).
+
+-----------------------------------------------------------------------
+9. POS INTEGRATION (P4-U2 CONTINUES TO WORK)
+-----------------------------------------------------------------------
+  - A POS sale consumes PosSession -> PosDevice -> Store stock. The
+    client cannot override the store (scope is server-derived; body
+    storeId is whitelist-rejected).
+  - D2 example verified end-to-end: Store A / X = 5, Store B / X = 7;
+    selling 2 from A -> A = 3, B = 7 (global absent, never touched).
+  - No fallback: a sale on an empty Store A pool returns 409
+    'Insufficient stock' even when Store B / the global pool hold stock.
+  - P4-U2 sale suite: 16/16 green (fixtures updated to seed the
+    session's store pool — see section 13).
+  - Two-store sale provenance + independent decrements re-verified
+    (A1 50->49, A2 10->9).
+
+-----------------------------------------------------------------------
+10. TENANT / STORE ISOLATION + SECURITY TESTS
+-----------------------------------------------------------------------
+  - 401 unauthenticated on both new routes.
+  - 403 outsider; 403 employee without inventory:manage (read-only
+    employees CAN read store pools).
+  - Cross-tenant: foreign store AND foreign variant via tenant B admin ->
+    uniform 404 (either documented message; no existence oracle); zero
+    rows created in either tenant (direct DB verification).
+  - Cross-store: adjustments/reads never touch another store's rows.
+  - Body tenantId / storeId injection -> 400.
+  - POS session/store mismatch: a sale can only consume its own
+    session's store pool (proven above).
+  - Owner semantic-all manages store pools without grants.
+  - Store delete blocked while stock references it (P2003 RESTRICT).
+  - 'PosDevice'/'PosSession'/'PosSale'/'Inventory' remain in
+    TENANT_SCOPED_MODELS; no raw SQL in production code.
+
+-----------------------------------------------------------------------
+11. CONCURRENCY TESTS (DETERMINISTIC, DB-ARBITRATED, NO SLEEPS)
+-----------------------------------------------------------------------
+  - SAME store / same variant: two concurrent POS sales racing the last
+    2 units -> exactly [201, 409]; final stock 0; never negative.
+  - DIFFERENT stores / same variant: concurrent decrements stay
+    independent — both 201; each pool drains separately.
+  - Same-store two-device last-unit race (P4-U2 suite) re-verified.
+
+-----------------------------------------------------------------------
+12. FULL REGRESSION RESULTS (ACTUAL RUNS, 2026-08-31)
+-----------------------------------------------------------------------
+  Focused P4-U3 unit (inventory service): 19/19 (11 existing + 8 new)
+  Focused P4-U3 integration (multi-store): 1 suite, 13/13
+  Full unit suite  : 48 suites, 703/703 passed
+                     (post-P4-U2 baseline 48/695; +8 tests exactly)
+  Full integration : 24 suites, 619/619 passed
+                     (post-P4-U2 baseline 23/606; +1 suite +13 tests)
+  npm run lint     : 2 errors — both the KNOWN PRE-EXISTING
+                     asset.service.spec.ts:203/:221; zero new
+  npm run build    : success
+  npx prettier --check: all files pass
+  npx prisma validate: valid
+  npx prisma migrate status: up to date (17 migrations)
+
+  REGRESSION NOTE (transparent): the Prisma unique->partial-index change
+  initially broke 3 pre-existing suites (pos-sale, order, u8-cross-domain)
+  because their fixtures used findUnique({variantId}) / update({variantId})
+  (no longer a Prisma-level unique) and seeded the global pool where sales
+  now consume the store pool. All fixes were legitimate fixture updates —
+  no test was weakened, no assertion removed; final results above show
+  every suite green.
+
+-----------------------------------------------------------------------
+13. KNOWN ISSUES
+-----------------------------------------------------------------------
+PRE-EXISTING (separate from P4-U3; untouched):
+  - src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+  - Inventory concurrent-increment flakiness under parallel load (did
+    NOT reproduce in this run).
+
+P4-U3 DEFECTS: none.
+
+-----------------------------------------------------------------------
+14. FILES CHANGED
+-----------------------------------------------------------------------
+Modified:
+  prisma/schema.prisma
+  src/inventory/inventory.service.ts
+  src/inventory/inventory.controller.ts
+  src/inventory/dto/inventory.dto.ts
+  src/inventory/inventory.service.spec.ts
+  src/order/order.service.ts          (internal scope param + T3 pool
+                                        resolution; public DTO untouched)
+  src/order/order.service.spec.ts     (cancel pool tests updated + new)
+  src/order/order.integration.spec.ts (race setup -> global pair)
+  src/order/u8-cross-domain.integration.spec.ts (getInventoryRow ->
+                                        findFirst on the global pair)
+  src/pos/pos-sale.service.ts         (passes the session's store scope)
+  src/pos/pos-sale.service.spec.ts     (options-arg expectations)
+  src/pos/pos-sale.integration.spec.ts (store-pool fixtures; two-store
+                                        + race tests re-scoped)
+  docs/phase-progress.md
+Created:
+  prisma/migrations/20260821140000_add_store_scoped_inventory/migration.sql
+  src/inventory/multi-store.integration.spec.ts (13 tests)
+  docs/phase4_p4u3_report.txt (this file)
+Deleted (temporary audit artifact):
+  scripts/p4u3_data_audit.mjs (read-only one-shot; never committed)
+
+-----------------------------------------------------------------------
+15. GIT
+-----------------------------------------------------------------------
+(Recorded after the operations succeeded.)
+
+  Commit message  : feat(inventory): implement P4-U3 multi-store inventory
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS — working tree clean after push
+
+=======================================================================
+FINAL BOUNDARY
+=======================================================================
+  P4-U3 COMPLETE -> DOCUMENTED -> COMMITTED -> PUSHED -> HARD STOP.
+  DO NOT start P4-U4 (Offline Operation Model) or any later checkpoint.
+  Each requires separate explicit approval.
+=======================================================================

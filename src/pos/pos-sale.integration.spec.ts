@@ -340,11 +340,19 @@ describe('POS Sale (integration)', () => {
   // Provision a sellable variant through direct tenant-scoped Prisma (the
   // catalog APIs were verified end-to-end in Phase 3/U8; this suite focuses
   // on the POS layer over the commerce engines).
+  /**
+   * Provisions a sellable variant. P4-U3: `poolStoreId` selects which stock
+   * pool receives `stock` — defaults to the PRIMARY store's pool because
+   * POS sales consume the SESSION's store pool (storeA1Id unless a test
+   * registers its device elsewhere). Pass null to seed the tenant-global
+   * pool (non-POS flows).
+   */
   const provisionVariant = async (
     tenantId: string,
     label: string,
     unitPrice: bigint,
     stock: number,
+    poolStoreId: string | null = storeA1Id,
   ) => {
     const cat = await tenantContext.run(tenantId, async () =>
       prisma.category.create({ data: { tenantId, name: `CAT-${label}` } }),
@@ -377,7 +385,12 @@ describe('POS Sale (integration)', () => {
     );
     await tenantContext.run(tenantId, async () =>
       prisma.inventory.create({
-        data: { tenantId, variantId: variant.id, quantityOnHand: stock },
+        data: {
+          tenantId,
+          variantId: variant.id,
+          storeId: poolStoreId,
+          quantityOnHand: stock,
+        },
       }),
     );
     return variant.id;
@@ -465,7 +478,9 @@ describe('POS Sale (integration)', () => {
       expect(paymentRow?.status).toBe('CAPTURED');
       expect(paymentRow?.amountMinor).toBe(3750n);
       const invRow = await tenantContext.run(tenantAId, async () =>
-        prisma.inventory.findUnique({ where: { variantId } }),
+        prisma.inventory.findFirst({
+          where: { variantId, storeId: storeA1Id },
+        }),
       );
       expect(invRow?.quantityOnHand).toBe(27);
 
@@ -721,7 +736,9 @@ describe('POS Sale (integration)', () => {
       expect((sale.body as ErrorBody).message).toBe('Insufficient stock');
 
       const invRow = await tenantContext.run(tenantAId, async () =>
-        prisma.inventory.findUnique({ where: { variantId } }),
+        prisma.inventory.findFirst({
+          where: { variantId, storeId: storeA1Id },
+        }),
       );
       expect(invRow?.quantityOnHand).toBe(2); // untouched
       const orders = await tenantContext.run(tenantAId, async () =>
@@ -735,6 +752,9 @@ describe('POS Sale (integration)', () => {
     });
 
     it('two devices selling the last units concurrently: exactly one wins (DB arbitrates)', async () => {
+      // P4-U3: both devices are registered on the SAME store so they race
+      // the SAME store pool (cross-store independence is covered by the
+      // multi-store suite).
       const variantId = await provisionVariant(
         tenantAId,
         `RC-${run}-${seq}`,
@@ -748,7 +768,7 @@ describe('POS Sale (integration)', () => {
       );
       const dev2 = await registerDevice(
         managerA,
-        storeA2Id,
+        storeA1Id,
         `RC2-${run}-${seq}`,
       );
       const s1 = await openSession(cashierA, dev1);
@@ -763,7 +783,9 @@ describe('POS Sale (integration)', () => {
       expect(statuses).toEqual([201, 409]); // exactly one sale wins
 
       const invRow = await tenantContext.run(tenantAId, async () =>
-        prisma.inventory.findUnique({ where: { variantId } }),
+        prisma.inventory.findFirst({
+          where: { variantId, storeId: storeA1Id },
+        }),
       );
       expect(invRow?.quantityOnHand).toBe(0); // never oversold
       const salesRows = await tenantContext.run(tenantAId, async () =>
@@ -967,7 +989,18 @@ describe('POS Sale (integration)', () => {
       expect(body.storeId).toBe(storeA1Id);
       expect(body.storeId).not.toBe(storeA2Id);
 
-      // A store-2 device has its own session and its own provenance.
+      // A store-2 device has its own session, its own provenance, and its
+      // OWN store pool (P4-U3) — seed it separately for the second sale.
+      await tenantContext.run(tenantAId, async () =>
+        prisma.inventory.create({
+          data: {
+            tenantId: tenantAId,
+            variantId,
+            storeId: storeA2Id,
+            quantityOnHand: 10,
+          },
+        }),
+      );
       const device2 = await registerDevice(
         managerA,
         storeA2Id,
@@ -977,7 +1010,22 @@ describe('POS Sale (integration)', () => {
       const sale2 = await mkSale(managerA, session2.id, [
         { variantId, quantity: 1 },
       ]);
+      expect(sale2.status).toBe(201);
       expect((sale2.body as SaleBody).storeId).toBe(storeA2Id);
+
+      // Pools decremented independently: A1 50->49, A2 10->9.
+      const a1 = await tenantContext.run(tenantAId, async () =>
+        prisma.inventory.findFirst({
+          where: { variantId, storeId: storeA1Id },
+        }),
+      );
+      expect(a1?.quantityOnHand).toBe(49);
+      const a2 = await tenantContext.run(tenantAId, async () =>
+        prisma.inventory.findFirst({
+          where: { variantId, storeId: storeA2Id },
+        }),
+      );
+      expect(a2?.quantityOnHand).toBe(9);
     });
   });
 });

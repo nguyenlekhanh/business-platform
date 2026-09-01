@@ -357,9 +357,11 @@ describe('U8 Cross-Domain (integration)', () => {
     };
   };
 
+  // P4-U3: the non-POS flows in this suite consume the tenant-GLOBAL pool
+  // (storeId null) — read it with findFirst on the scoped pair.
   const getInventoryRow = (variantId: string) =>
     tenantContext.run(tenantAId, async () =>
-      prisma.inventory.findUnique({ where: { variantId } }),
+      prisma.inventory.findFirst({ where: { variantId, storeId: null } }),
     );
 
   // ------------------------------------------------------------------

@@ -18,6 +18,7 @@ describe('OrderService', () => {
   const mockProductFindMany = jest.fn();
   const mockInventoryUpdateMany = jest.fn();
   const mockInventoryFindUnique = jest.fn();
+  const mockInventoryFindFirst = jest.fn();
   const mockInventoryCreate = jest.fn();
   const mockOrderCreate = jest.fn();
   const mockOrderFindUnique = jest.fn();
@@ -30,6 +31,7 @@ describe('OrderService', () => {
   const mockCartItemFindMany = jest.fn();
   const mockCartUpdate = jest.fn();
   const mockCustomerFindUnique = jest.fn();
+  const mockPosSaleFindUnique = jest.fn();
 
   interface MockTx {
     productVariant: {
@@ -41,6 +43,7 @@ describe('OrderService', () => {
     inventory: {
       updateMany: typeof mockInventoryUpdateMany;
       findUnique: typeof mockInventoryFindUnique;
+      findFirst: typeof mockInventoryFindFirst;
       create: typeof mockInventoryCreate;
     };
     order: {
@@ -60,6 +63,7 @@ describe('OrderService', () => {
     };
     cartItem: { findMany: typeof mockCartItemFindMany };
     customer: { findUnique: typeof mockCustomerFindUnique };
+    posSale: { findUnique: typeof mockPosSaleFindUnique };
   }
 
   const mockTransaction = jest.fn(
@@ -74,6 +78,7 @@ describe('OrderService', () => {
         inventory: {
           updateMany: mockInventoryUpdateMany,
           findUnique: mockInventoryFindUnique,
+          findFirst: mockInventoryFindFirst,
           create: mockInventoryCreate,
         },
         order: {
@@ -93,6 +98,7 @@ describe('OrderService', () => {
         },
         cartItem: { findMany: mockCartItemFindMany },
         customer: { findUnique: mockCustomerFindUnique },
+        posSale: { findUnique: mockPosSaleFindUnique },
       };
       return cb(mockTx);
     },
@@ -244,7 +250,11 @@ describe('OrderService', () => {
       expect(result.subtotalMinor).toBe('2000');
       expect(result.items[0].sku).toBe('SKU-1');
       expect(mockInventoryUpdateMany).toHaveBeenCalledWith({
-        where: { variantId: 'var-1', quantityOnHand: { gte: 2 } },
+        where: {
+          variantId: 'var-1',
+          storeId: null,
+          quantityOnHand: { gte: 2 },
+        },
         data: { quantityOnHand: { decrement: 2 } },
       });
     });
@@ -308,11 +318,12 @@ describe('OrderService', () => {
   });
 
   describe('cancelOrder', () => {
-    it('cancels pending order and restocks', async () => {
+    it('cancels a non-POS order and restocks the GLOBAL pool (PosSale absent)', async () => {
       mockOrderFindUnique.mockResolvedValueOnce(order({ status: 'PENDING' }));
       mockOrderUpdateMany.mockResolvedValue({ count: 1 });
+      mockPosSaleFindUnique.mockResolvedValue(null); // not a POS order
       mockOrderItemFindMany.mockResolvedValue([orderItem({ quantity: 2 })]);
-      mockInventoryFindUnique.mockResolvedValue({ quantityOnHand: 3 } as any);
+      mockInventoryFindFirst.mockResolvedValue({ quantityOnHand: 3 });
       mockInventoryUpdateMany.mockResolvedValue({ count: 1 });
       mockOrderFindUnique.mockResolvedValueOnce(
         order({ status: 'CANCELLED', cancelledAt: new Date() }),
@@ -321,7 +332,34 @@ describe('OrderService', () => {
 
       const result = await runInTenant(() => service.cancelOrder('order-1'));
       expect(result.status).toBe('CANCELLED');
-      expect(mockInventoryUpdateMany).toHaveBeenCalled();
+      expect(mockInventoryUpdateMany).toHaveBeenCalledWith({
+        where: { variantId: 'var-1', storeId: null },
+        data: { quantityOnHand: { increment: 2 } },
+      });
+      // Restock-pool resolution consulted the PosSale provenance.
+      expect(mockPosSaleFindUnique).toHaveBeenCalledWith({
+        where: { orderId: 'order-1' },
+        select: { storeId: true },
+      });
+    });
+
+    it('cancels a POS order and restocks the POS sale store pool exactly once', async () => {
+      mockOrderFindUnique.mockResolvedValueOnce(order({ status: 'PENDING' }));
+      mockOrderUpdateMany.mockResolvedValue({ count: 1 });
+      mockPosSaleFindUnique.mockResolvedValue({ storeId: 'store-1' });
+      mockOrderItemFindMany.mockResolvedValue([orderItem({ quantity: 2 })]);
+      mockInventoryFindFirst.mockResolvedValue({ quantityOnHand: 3 });
+      mockInventoryUpdateMany.mockResolvedValue({ count: 1 });
+      mockOrderFindUnique.mockResolvedValueOnce(
+        order({ status: 'CANCELLED', cancelledAt: new Date() }),
+      );
+      mockOrderItemFindMany.mockResolvedValueOnce([orderItem()]);
+
+      await runInTenant(() => service.cancelOrder('order-1'));
+      expect(mockInventoryUpdateMany).toHaveBeenCalledWith({
+        where: { variantId: 'var-1', storeId: 'store-1' },
+        data: { quantityOnHand: { increment: 2 } },
+      });
     });
 
     it('throws Conflict when not pending', async () => {

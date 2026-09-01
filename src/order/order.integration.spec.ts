@@ -751,10 +751,11 @@ describe('Order (integration)', () => {
     });
 
     it('concurrent orders on last units: exactly one succeeds', async () => {
-      // Setup: 2 units in stock
+      // Setup: 2 units in the tenant-global pool (P4-U3: non-POS orders
+      // consume storeId NULL; update via the scoped pair).
       await tenantContext.run(tenantAId, async () =>
-        prisma.inventory.update({
-          where: { variantId: variantAId },
+        prisma.inventory.updateMany({
+          where: { variantId: variantAId, storeId: null },
           data: { quantityOnHand: 2 },
         }),
       );

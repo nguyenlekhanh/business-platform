@@ -1,4 +1,4 @@
-import {
+﻿import {
   ConflictException,
   InternalServerErrorException,
   NotFoundException,
@@ -14,7 +14,8 @@ describe('InventoryService', () => {
   let tenantContext: TenantContextService;
 
   const mockVariantFindUnique = jest.fn();
-  const mockInvFindUnique = jest.fn();
+  const mockInvFindFirst = jest.fn();
+  const mockStoreFindUnique = jest.fn();
   const mockInvUpdateMany = jest.fn();
   const mockInvCreate = jest.fn();
 
@@ -34,6 +35,7 @@ describe('InventoryService', () => {
     id: 'inv-1',
     tenantId: 'tenant-1',
     variantId: 'var-1',
+    storeId: null,
     quantityOnHand: 10,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -56,8 +58,9 @@ describe('InventoryService', () => {
           provide: PrismaService,
           useValue: {
             productVariant: { findUnique: mockVariantFindUnique },
+            store: { findUnique: mockStoreFindUnique },
             inventory: {
-              findUnique: mockInvFindUnique,
+              findFirst: mockInvFindFirst,
               updateMany: mockInvUpdateMany,
               create: mockInvCreate,
             },
@@ -90,7 +93,7 @@ describe('InventoryService', () => {
   describe('getInventory', () => {
     it('returns zero summary when no row exists', async () => {
       mockVariantFindUnique.mockResolvedValue(variant());
-      mockInvFindUnique.mockResolvedValue(null);
+      mockInvFindFirst.mockResolvedValue(null);
       const result = await runInTenant(() => service.getInventory('var-1'));
       expect(result.quantityOnHand).toBe(0);
       expect(result.id).toBeNull();
@@ -100,7 +103,7 @@ describe('InventoryService', () => {
 
     it('returns stored quantity when row exists', async () => {
       mockVariantFindUnique.mockResolvedValue(variant());
-      mockInvFindUnique.mockResolvedValue(inventory({ quantityOnHand: 7 }));
+      mockInvFindFirst.mockResolvedValue(inventory({ quantityOnHand: 7 }));
       const result = await runInTenant(() => service.getInventory('var-1'));
       expect(result.quantityOnHand).toBe(7);
       expect(result.id).toBe('inv-1');
@@ -111,7 +114,7 @@ describe('InventoryService', () => {
       await expect(
         runInTenant(() => service.getInventory('nope')),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockInvFindUnique).not.toHaveBeenCalled();
+      expect(mockInvFindFirst).not.toHaveBeenCalled();
     });
   });
 
@@ -119,7 +122,7 @@ describe('InventoryService', () => {
     it('creates row on first positive delta when no row exists', async () => {
       mockVariantFindUnique.mockResolvedValue(variant());
       mockInvUpdateMany.mockResolvedValue({ count: 0 });
-      mockInvFindUnique
+      mockInvFindFirst
         .mockResolvedValueOnce(null) // check after updateMany 0
         .mockResolvedValueOnce(null); // not needed?
       mockInvCreate.mockResolvedValue(inventory({ quantityOnHand: 5 }));
@@ -129,14 +132,19 @@ describe('InventoryService', () => {
       );
       expect(result.quantityOnHand).toBe(5);
       expect(mockInvCreate).toHaveBeenCalledWith({
-        data: { tenantId: 'tenant-1', variantId: 'var-1', quantityOnHand: 5 },
+        data: {
+          tenantId: 'tenant-1',
+          variantId: 'var-1',
+          storeId: null,
+          quantityOnHand: 5,
+        },
       });
     });
 
     it('throws insufficient stock when decrementing missing row', async () => {
       mockVariantFindUnique.mockResolvedValue(variant());
       mockInvUpdateMany.mockResolvedValue({ count: 0 });
-      mockInvFindUnique.mockResolvedValue(null);
+      mockInvFindFirst.mockResolvedValue(null);
 
       await expect(
         runInTenant(() => service.adjust({ variantId: 'var-1', delta: -1 })),
@@ -147,14 +155,18 @@ describe('InventoryService', () => {
     it('applies guarded updateMany for positive delta on existing row', async () => {
       mockVariantFindUnique.mockResolvedValue(variant());
       mockInvUpdateMany.mockResolvedValue({ count: 1 });
-      mockInvFindUnique.mockResolvedValue(inventory({ quantityOnHand: 15 }));
+      mockInvFindFirst.mockResolvedValue(inventory({ quantityOnHand: 15 }));
 
       const result = await runInTenant(() =>
         service.adjust({ variantId: 'var-1', delta: 5 }),
       );
       expect(result.quantityOnHand).toBe(15);
       expect(mockInvUpdateMany).toHaveBeenCalledWith({
-        where: { variantId: 'var-1', quantityOnHand: { gte: -5 } },
+        where: {
+          variantId: 'var-1',
+          storeId: null,
+          quantityOnHand: { gte: -5 },
+        },
         data: { quantityOnHand: { increment: 5 } },
       });
       expect(mockInvCreate).not.toHaveBeenCalled();
@@ -163,7 +175,7 @@ describe('InventoryService', () => {
     it('throws insufficient stock when guarded update fails on existing row', async () => {
       mockVariantFindUnique.mockResolvedValue(variant());
       mockInvUpdateMany.mockResolvedValue({ count: 0 });
-      mockInvFindUnique.mockResolvedValue(inventory({ quantityOnHand: 2 }));
+      mockInvFindFirst.mockResolvedValue(inventory({ quantityOnHand: 2 }));
 
       await expect(
         runInTenant(() => service.adjust({ variantId: 'var-1', delta: -5 })),
@@ -175,10 +187,10 @@ describe('InventoryService', () => {
       mockInvUpdateMany
         .mockResolvedValueOnce({ count: 0 })
         .mockResolvedValueOnce({ count: 1 });
-      mockInvFindUnique.mockResolvedValueOnce(null); // first check missing
+      mockInvFindFirst.mockResolvedValueOnce(null); // first check missing
       mockInvCreate.mockRejectedValue(p2002());
       // after fallback, findUnique returns row
-      mockInvFindUnique.mockResolvedValueOnce(inventory({ quantityOnHand: 5 })); // retry fetch
+      mockInvFindFirst.mockResolvedValueOnce(inventory({ quantityOnHand: 5 })); // retry fetch
 
       const result = await runInTenant(() =>
         service.adjust({ variantId: 'var-1', delta: 5 }),
@@ -194,6 +206,163 @@ describe('InventoryService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(mockInvUpdateMany).not.toHaveBeenCalled();
       expect(mockInvCreate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('store-scoped pools (P4-U3, D2 Option A)', () => {
+    it('getScopedInventory returns zero summary when no store row exists', async () => {
+      mockVariantFindUnique.mockResolvedValue(variant());
+      mockStoreFindUnique.mockResolvedValue({ id: 'store-1' });
+      mockInvFindFirst.mockResolvedValue(null);
+
+      const result = await runInTenant(() =>
+        service.getScopedInventory(
+          { kind: 'store', storeId: 'store-1' },
+          'var-1',
+        ),
+      );
+      expect(result.quantityOnHand).toBe(0);
+      expect(result.storeId).toBe('store-1');
+      expect(result.id).toBeNull();
+    });
+
+    it('getScopedInventory reads only the store pool (global untouched)', async () => {
+      mockVariantFindUnique.mockResolvedValue(variant());
+      mockStoreFindUnique.mockResolvedValue({ id: 'store-1' });
+      mockInvFindFirst.mockResolvedValue(
+        inventory({ storeId: 'store-1', quantityOnHand: 7 }),
+      );
+
+      const result = await runInTenant(() =>
+        service.getScopedInventory(
+          { kind: 'store', storeId: 'store-1' },
+          'var-1',
+        ),
+      );
+      expect(result.quantityOnHand).toBe(7);
+      expect(mockInvFindFirst).toHaveBeenCalledWith({
+        where: { variantId: 'var-1', storeId: 'store-1' },
+      });
+    });
+
+    it('adjustScoped throws uniform 404 for a foreign/unknown store', async () => {
+      mockVariantFindUnique.mockResolvedValue(variant());
+      mockStoreFindUnique.mockResolvedValue(null);
+
+      await expect(
+        runInTenant(() =>
+          service.adjustScoped(
+            { kind: 'store', storeId: 'nope' },
+            { variantId: 'var-1', delta: 1 },
+          ),
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockInvUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('adjustScoped decrements only the store pool with a guarded update', async () => {
+      mockVariantFindUnique.mockResolvedValue(variant());
+      mockStoreFindUnique.mockResolvedValue({ id: 'store-1' });
+      mockInvUpdateMany.mockResolvedValue({ count: 1 });
+      mockInvFindFirst.mockResolvedValue(
+        inventory({ storeId: 'store-1', quantityOnHand: 3 }),
+      );
+
+      const result = await runInTenant(() =>
+        service.adjustScoped(
+          { kind: 'store', storeId: 'store-1' },
+          { variantId: 'var-1', delta: -3 },
+        ),
+      );
+      expect(result.quantityOnHand).toBe(3);
+      expect(mockInvUpdateMany).toHaveBeenCalledWith({
+        where: {
+          variantId: 'var-1',
+          storeId: 'store-1',
+          quantityOnHand: { gte: 3 },
+        },
+        data: { quantityOnHand: { increment: -3 } },
+      });
+    });
+
+    it('adjustScoped insufficient store stock leaves the pool untouched (409)', async () => {
+      mockVariantFindUnique.mockResolvedValue(variant());
+      mockStoreFindUnique.mockResolvedValue({ id: 'store-1' });
+      mockInvUpdateMany.mockResolvedValue({ count: 0 });
+      mockInvFindFirst.mockResolvedValue(
+        inventory({ storeId: 'store-1', quantityOnHand: 1 }),
+      );
+
+      await expect(
+        runInTenant(() =>
+          service.adjustScoped(
+            { kind: 'store', storeId: 'store-1' },
+            { variantId: 'var-1', delta: -5 },
+          ),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('adjustScoped lazy-creates the store pool row on first positive delta', async () => {
+      mockVariantFindUnique.mockResolvedValue(variant());
+      mockStoreFindUnique.mockResolvedValue({ id: 'store-1' });
+      mockInvUpdateMany.mockResolvedValue({ count: 0 });
+      mockInvFindFirst.mockResolvedValueOnce(null);
+      mockInvCreate.mockResolvedValue(
+        inventory({ storeId: 'store-1', quantityOnHand: 5 }),
+      );
+
+      const result = await runInTenant(() =>
+        service.adjustScoped(
+          { kind: 'store', storeId: 'store-1' },
+          { variantId: 'var-1', delta: 5 },
+        ),
+      );
+      expect(result.quantityOnHand).toBe(5);
+      expect(mockInvCreate).toHaveBeenCalledWith({
+        data: {
+          tenantId: 'tenant-1',
+          variantId: 'var-1',
+          storeId: 'store-1',
+          quantityOnHand: 5,
+        },
+      });
+    });
+
+    it('global and store pools are fully independent rows (no cross-decrement)', async () => {
+      // Global adjust targets storeId: null; store adjust targets its own
+      // store — the guarded where clauses can never overlap.
+      mockVariantFindUnique.mockResolvedValue(variant());
+      mockStoreFindUnique.mockResolvedValue({ id: 'store-1' });
+      mockInvUpdateMany.mockResolvedValue({ count: 1 });
+      mockInvFindFirst.mockResolvedValue(inventory({ quantityOnHand: 10 }));
+
+      await runInTenant(() =>
+        service.adjust({ variantId: 'var-1', delta: -2 }),
+      );
+      expect(mockInvUpdateMany).toHaveBeenLastCalledWith({
+        where: {
+          variantId: 'var-1',
+          storeId: null,
+          quantityOnHand: { gte: 2 },
+        },
+        data: { quantityOnHand: { increment: -2 } },
+      });
+
+      await runInTenant(() =>
+        service.adjustScoped(
+          { kind: 'store', storeId: 'store-1' },
+          { variantId: 'var-1', delta: -2 },
+        ),
+      );
+      expect(mockInvUpdateMany).toHaveBeenLastCalledWith({
+        where: {
+          variantId: 'var-1',
+          storeId: 'store-1',
+          quantityOnHand: { gte: 2 },
+        },
+        data: { quantityOnHand: { increment: -2 } },
+      });
     });
   });
 });

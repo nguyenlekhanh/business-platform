@@ -108,14 +108,20 @@ export class PosSaleService {
     const method = dto.method ?? 'CASH';
 
     // 2. Order via the existing Core Commerce T1 (server-authoritative
-    //    pricing + guarded stock decrement + snapshots).
-    const order = await this.orderService.createOrder(userId, {
-      items: dto.items.map((i) => ({
-        variantId: i.variantId,
-        quantity: i.quantity,
-      })),
-      ...(dto.customerId !== undefined ? { customerId: dto.customerId } : {}),
-    });
+    //    pricing + guarded stock decrement + snapshots). P4-U3: the sale
+    //    consumes the STORE's pool (session -> device -> store), never the
+    //    tenant-global pool and never a client-selected store.
+    const order = await this.orderService.createOrder(
+      userId,
+      {
+        items: dto.items.map((i) => ({
+          variantId: i.variantId,
+          quantity: i.quantity,
+        })),
+        ...(dto.customerId !== undefined ? { customerId: dto.customerId } : {}),
+      },
+      { inventoryScope: { kind: 'store', storeId: session.storeId } },
+    );
 
     // 3. Payment via the existing T5 (amount/currency derived from Order).
     const payment = await this.paymentService.createPayment({

@@ -237,10 +237,13 @@ describe('PosSaleService', () => {
         service.createSale('user-1', saleDto),
       );
 
-      // Order via the existing OrderService with the sale items.
-      expect(mockOrderCreate).toHaveBeenCalledWith('user-1', {
-        items: [{ variantId: 'variant-1', quantity: 2 }],
-      });
+      // Order via the existing OrderService with the sale items AND the
+      // store scope (P4-U3: the sale consumes the session's store pool).
+      expect(mockOrderCreate).toHaveBeenCalledWith(
+        'user-1',
+        { items: [{ variantId: 'variant-1', quantity: 2 }] },
+        { inventoryScope: { kind: 'store', storeId: 'store-1' } },
+      );
       // Payment via the existing T5 with the created order id.
       expect(mockPaymentCreate).toHaveBeenCalledWith({
         orderId: 'order-1',
@@ -283,10 +286,14 @@ describe('PosSaleService', () => {
       await runInTenant(() =>
         service.createSale('user-1', { ...saleDto, customerId: 'cust-9' }),
       );
-      expect(mockOrderCreate).toHaveBeenCalledWith('user-1', {
-        items: [{ variantId: 'variant-1', quantity: 2 }],
-        customerId: 'cust-9',
-      });
+      expect(mockOrderCreate).toHaveBeenCalledWith(
+        'user-1',
+        {
+          items: [{ variantId: 'variant-1', quantity: 2 }],
+          customerId: 'cust-9',
+        },
+        { inventoryScope: { kind: 'store', storeId: 'store-1' } },
+      );
     });
 
     it('surfaces upstream commerce failures (insufficient stock) unchanged', async () => {

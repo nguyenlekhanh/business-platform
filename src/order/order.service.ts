@@ -28,6 +28,25 @@ const CART_EMPTY = 'Cart is empty';
 const CUSTOMER_NOT_FOUND = 'Customer not found';
 const NOT_PENDING = 'Only pending orders can be cancelled';
 
+/**
+ * INTERNAL-ONLY order-creation options — Phase 4 P4-U3.
+ *
+ * `inventoryScope` selects the stock pool T1 decrements and T3 restocks:
+ *   - 'global' (default): the tenant-global pool — the exact Phase 3
+ *     behavior; every existing caller and the public API are unchanged.
+ *   - { kind: 'store', storeId }: a store-scoped pool. Used by the POS
+ *     orchestration, which derives the store from the authenticated
+ *     PosSession -> PosDevice (never the client).
+ *
+ * This parameter is server-internal: CreateOrderDto is untouched, so no
+ * HTTP client can select a store. Cancellation resolves the SAME pool
+ * deterministically: a POS order restocks its PosSale-provenance store;
+ * a non-POS order restocks the global pool.
+ */
+export interface CreateOrderOptions {
+  inventoryScope?: { kind: 'global' } | { kind: 'store'; storeId: string };
+}
+
 export interface OrderItemSummary {
   id: string;
   variantId: string;
@@ -64,9 +83,16 @@ export class OrderService {
   async createOrder(
     userId: string,
     dto: CreateOrderDto,
+    options?: CreateOrderOptions,
   ): Promise<OrderSummary> {
     this.assertTenantContext();
     const tenantId = this.tenantContext.requireTenantId();
+    // Default = the Phase 3 tenant-global pool (all existing callers
+    // unchanged). A store scope is only set by the POS orchestration.
+    const poolStoreId: string | null =
+      options?.inventoryScope?.kind === 'store'
+        ? options.inventoryScope.storeId
+        : null;
     let itemsInput: Array<{ variantId: string; quantity: number }>;
     let cartToConvertId: string | null = null;
 
@@ -146,7 +172,11 @@ export class OrderService {
 
       for (const [vid, qty] of aggregated.entries()) {
         const res = await tx.inventory.updateMany({
-          where: { variantId: vid, quantityOnHand: { gte: qty } },
+          where: {
+            variantId: vid,
+            storeId: poolStoreId,
+            quantityOnHand: { gte: qty },
+          },
           data: { quantityOnHand: { decrement: qty } },
         });
         if (res.count === 0) throw new ConflictException(INSUFFICIENT_STOCK);
@@ -278,23 +308,41 @@ export class OrderService {
         data: { status: 'CANCELLED', cancelledAt: new Date() },
       });
       if (updated.count === 0) throw new ConflictException(NOT_PENDING);
+
+      // P4-U3 deterministic restock-pool resolution: a POS order has a
+      // PosSale provenance row (created in the same flow as the order) that
+      // records the store whose pool T1 decremented; restock returns units
+      // to EXACTLY that pool. A non-POS order (created through the public
+      // API or cart checkout, which always use the global pool) restocks
+      // the global pool. No guessing: the scope is recorded data.
+      const posSale = await tx.posSale.findUnique({
+        where: { orderId },
+        select: { storeId: true },
+      });
+      const restockStoreId: string | null = posSale?.storeId ?? null;
+
       const items = await tx.orderItem.findMany({ where: { orderId } });
       const agg = new Map<string, number>();
       for (const it of items) {
         agg.set(it.variantId, (agg.get(it.variantId) ?? 0) + it.quantity);
       }
       for (const [vid, qty] of agg.entries()) {
-        const existing = await tx.inventory.findUnique({
-          where: { variantId: vid },
+        const existing = await tx.inventory.findFirst({
+          where: { variantId: vid, storeId: restockStoreId },
         });
         if (!existing) {
           const tenantId = this.tenantContext.requireTenantId();
           await tx.inventory.create({
-            data: { tenantId, variantId: vid, quantityOnHand: qty },
+            data: {
+              tenantId,
+              variantId: vid,
+              storeId: restockStoreId,
+              quantityOnHand: qty,
+            },
           });
         } else {
           await tx.inventory.updateMany({
-            where: { variantId: vid },
+            where: { variantId: vid, storeId: restockStoreId },
             data: { quantityOnHand: { increment: qty } },
           });
         }
