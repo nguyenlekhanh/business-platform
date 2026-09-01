@@ -1,0 +1,342 @@
+=======================================================================
+ PHASE 4 — POS + OFFLINE SYNC
+ P4-U7 — CONFLICT HANDLING + RECONCILIATION
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 4, Unit 7 (Conflict Handling + Reconciliation)
+Date       : 2026-08-31
+Status     : COMPLETE — implemented, verified, documented, committed,
+             pushed. HARD STOP before P4-U8.
+Starting
+Git commit : f57f205 ("docs(phase4): record final P4-U6 commit hash
+                    in report")
+Governing
+decisions : D1–D8 frozen (docs/phase4_discovery_report.txt §16); the
+             P4-U7 checkpoint line: "stock conflicts at sync (409
+             semantics), price authority decision (Q14), stale-
+             authorization rejections, device recovery flows";
+             D9 names PosSession as the anchor for "intent ownership
+             and reconciliation reports".
+
+-----------------------------------------------------------------------
+1. DISCOVERY GATE (MANDATORY — answered from the repository)
+-----------------------------------------------------------------------
+ Q  What exactly is considered a conflict?
+    An offline operation that cannot be executed as-is at sync: price
+    drift (D3 PRICE_CHANGED), stock shortfall (D4 OUT_OF_STOCK),
+    stale authorization (D7 demotion -> 403, the operation stays
+    PENDING), missing/inactive variant (VARIANT_NOT_FOUND /
+    VARIANT_NOT_ACTIVE), mixed currency (CURRENCY_MIX — the existing
+    uniform-currency rule), missing price (PRICE_NOT_FOUND), empty
+    intent (EMPTY_INTENT). ALL are already implemented DETERMINISTICALLY
+    by P4-U5 (validateIntent + typed resultCodes).
+
+ Q  Which outcomes are deterministic U5 outcomes, NOT reconciliation
+    conflicts?
+    ALL of the above. D3: "the offline sale intent is REJECTED (never
+    silently repriced) with the deterministic failure reason
+    PRICE_CHANGED". D4: "reject the operation and mark it as
+    failed/voided ... Deterministic failure reason: OUT_OF_STOCK".
+    They are TERMINAL business rejections, durably recorded on
+    PosOperation (status REJECTED + typed resultCode).
+
+ Q  How is DUPLICATE different from CONFLICT?
+    DUPLICATE is the idempotent replay of an ALREADY-ACCEPTED operation
+    (P4-U5 returns the original durable Order/Payment result without
+    re-execution) — the P4-U4 enum value. It is NOT a conflict: nothing
+    failed; the intent succeeded exactly once.
+
+ Q  What happens when the server price changed? -> D3: terminal
+    REJECTED/PRICE_CHANGED; never repriced; no Order/Payment/stock.
+ Q  When stock changed? -> D4: terminal REJECTED/OUT_OF_STOCK; never
+    partial; stock untouched (or the T1 guarded decrement rejects an
+    engine-level race and sync persists OUT_OF_STOCK).
+ Q  When authorization changed? -> D7: 403 at sync; the operation
+    stays PENDING (never silently resolved); a later authorized sync
+    may still execute it.
+ Q  When the session is no longer valid? Sessions are historical
+    anchors: sync executes intents from CLOSED shifts after full D6/D7
+    revalidation (allowClosedSession); the operation RETAINS its
+    session identity permanently.
+ Q  Already accepted? -> return the original Order/Payment result
+    (idempotent; never re-executed).
+ Q  Already rejected? -> return the persisted rejection UNCHANGED
+    ("a business rejection is never retried into a different outcome"
+    — pos-sync.service.ts:110-111).
+
+ Q  What must remain immutable for audit/provenance?
+    clientUuid, deviceId, seq, tenantId, storeId, sessionId,
+    cashierId, createdAt, the frozen PosOperationItem lines +
+    observedUnitAmountMinor, and once written the durable result
+    (status/resultCode/resultOrderId/resultPaymentId). Integration
+    this unit proves the intent is BIT-FOR-BIT unchanged after every
+    reconciliation read and retry.
+
+ Q  What may be corrected/annotated during reconciliation?
+    NOTHING. No correction policy is approved anywhere in the
+    repository (checked D1-D8, the P4-U7 checkpoint line, discovery
+    Q10/Q14 which were resolved INTO the D3/D4 terminal-rejection
+    rules). Reconciliation is a read projection.
+
+ Q  Who is allowed to reconcile? The existing pos:read key governs the
+    reports (staff/device views). No new RBAC permission created; a
+    cashier gains no extra authority by having created an operation.
+ Q  Automatic or manual? AUTOMATIC conflict handling is the existing
+    deterministic sync outcome (U5). MANUAL resolution is NOT approved
+    anywhere — per instruction 8 (STOP if not approved) it was NOT
+    invented; out of scope by design.
+ Q  Does reconciliation create/modify a sale? NO. It only records —
+    and even "records" here means: projects the durable resolution the
+    sync already persisted. No new Order; no modification of existing
+    Orders.
+ Q  Can a rejected offline op be retried automatically? Re-sync
+    returns the SAME persisted rejection (terminal; deterministic).
+ Q  Can an accepted op be reversed? NO (no refunds/reversals exist
+    anywhere — frozen).
+ Q  How are conflicts surfaced? The sync response itself (typed
+    status/resultCode) — and now ALSO the durable device/session
+    reconciliation reports (this unit).
+ Q  Does the feed need more? NO — results are visible through the
+    operation/device endpoints; no new PosFeedEvent kind required
+    (no speculative events).
+ Q  Is a schema change required? NO. "No migration required —
+    discovery confirmed existing schema is sufficient": PosOperation
+    already persists every resolution field. 19 migrations unchanged.
+
+ NO STOP was required: every answer was resolvable from the approved
+ architecture. P4-U7's implementation is the minimal read-only report
+ surface the approved semantics call for.
+
+-----------------------------------------------------------------------
+2. CONFLICT TAXONOMY (established from the repository)
+-----------------------------------------------------------------------
+ REUSED codes only (no new codes invented):
+   PRICE_CHANGED | OUT_OF_STOCK | CURRENCY_MIX | PRICE_NOT_FOUND |
+   VARIANT_NOT_FOUND | VARIANT_NOT_ACTIVE | EMPTY_INTENT   (terminal,
+   deterministic, D3/D4-backed)
+   plus the D7 authorization rejection (surfaced as 403 at sync; the
+   operation remains PENDING — resolved only by a later authorized
+   sync).
+
+ CLASSIFICATION:
+   - Idempotent duplicate (same op retried)      -> NOT a conflict:
+     return the durable existing result.
+   - Already-accepted operation                   -> NOT a conflict:
+     return the original Order/Payment.
+   - Deterministic business rejection            -> NOT a
+     reconciliation conflict: TERMINAL under D3/D4 (the approved
+     architecture explicitly chose reject-and-mark over hold/review —
+     discovery Q10's option (a), approved via D4).
+   - Genuine conflict requiring human/system resolution -> NONE
+     EXISTS in the approved architecture. No example was invented.
+
+-----------------------------------------------------------------------
+3. RECONCILIATION SEMANTICS (as implemented)
+-----------------------------------------------------------------------
+Reconciliation = READ-ONLY conflict surfacing + reports. The safety
+principle is absolute by construction: the reconciliation service has
+NO write path at all (pure findMany/findUnique projections), so it
+CANNOT silently alter variant, quantity, price, currency, cashier,
+device, tenant, store, session, or payment method. Nothing is
+repriced, reduced, removed, substituted, or re-resolved.
+
+-----------------------------------------------------------------------
+4. AUTOMATIC VS MANUAL RESOLUTION
+-----------------------------------------------------------------------
+Automatic (existing): every conflict class resolves deterministically
+at sync (D3/D4/D7 rules; DB-arbitrated guards; no heuristics, no best
+effort, no silent server-value substitution).
+Manual: NOT APPROVED anywhere in the repository — therefore NOT
+implemented (no /reconcile /resolve mutation endpoints, no resolution
+payload, no state transition out of a rejection). Recorded as the
+explicit discovery finding rather than invented.
+
+-----------------------------------------------------------------------
+5. AUTHORIZATION
+-----------------------------------------------------------------------
+Existing keys only: GET reports require pos:read (the established
+read permission for POS data). No new permission. The report performs
+NO action on behalf of anyone; a cashier's authorship of an operation
+grants nothing extra. Tenant isolation: fail-closed extension scoping
+(foreign device/session -> uniform 404). Cross-device: the report is
+scoped to one authenticated tenant + one path-scoped device/session.
+
+-----------------------------------------------------------------------
+6. IMMUTABLE PROVENANCE (proven)
+-----------------------------------------------------------------------
+The integration suite snapshots the FULL intent (identity + frozen
+lines + observed prices as strings) and asserts bit-for-bit equality
+after: every reconciliation read, retried syncs (accepted and
+rejected), and repeated reports. No field of the original operation or
+its items is ever mutated by P4-U7.
+
+-----------------------------------------------------------------------
+7. RETRY / IDEMPOTENCY
+-----------------------------------------------------------------------
+ PENDING op    -> sync may execute it (deterministically).
+ ACCEPTED op   -> retry returns the SAME Order/Payment ids; never a
+                  second Order/Payment/capture/decrement.
+ REJECTED op   -> retry returns the SAME rejection; never flips.
+ CONFLICT op   -> no distinct "conflict" state exists (taxonomically a
+                  REJECTED/typed code or a PENDING-auth case), so
+                  repeated sync returns the same deterministic class.
+ Reconciliation reads -> pure; repeated calls return identical
+                  bodies; zero side effects (no duplicate anything).
+ No timestamps/random ids are used as idempotency substitutes — the
+ durable PosOperation row IS the idempotency record (P4-U4/U5).
+
+-----------------------------------------------------------------------
+8. CONCURRENCY STRATEGY
+-----------------------------------------------------------------------
+Sync concurrency: unchanged P4-U5 (DB-arbitrated processedAt claim;
+exactly-once execution; both callers the same durable result) —
+re-proven this unit including via the report (one ACCEPTED row, one
+Order).
+Concurrent reconciliation: the reports are pure reads on
+snapshot-isolated PostgreSQL SELECTs — two concurrent report requests
+observe the same durable rows; no side effects exist to duplicate.
+Sync-vs-reconciliation race: N/A — reconciliation cannot modify, so
+there is no write/write race to serialize; the report simply observes
+whatever durable state exists (PENDING while a sync is in flight;
+terminal after). No unsafe rule needed; nothing was guessed.
+
+-----------------------------------------------------------------------
+9. INVENTORY / PRICE / PAYMENT SEMANTICS (unchanged, re-verified)
+-----------------------------------------------------------------------
+Inventory: all-or-nothing preserved; a conflict never produces
+negative stock, partial fulfillment, dropped items, or quantity
+reduction; no stock is mutated to make reconciliation succeed (the
+service has no writes at all).
+Price: D3 preserved — PRICE_CHANGED is terminal; the original
+PosOperationItem snapshot is never replaced with the server price.
+Payment: D5/P4-U6 preserved — offline remains CASH ONLY; no CASH->CARD
+conversion path exists (the reports cannot even represent a payment
+change — they only read the durable result); no card data anywhere.
+Order relationship: a rejected/conflicted operation has NO Order
+(correct); an accepted operation's Order/Payment ids remain attached.
+
+-----------------------------------------------------------------------
+10. FEED / WATERMARK INTERACTION
+-----------------------------------------------------------------------
+NONE required. The existing PosFeedEvent (D8) covers catalog changes;
+operation results are delivered through the sync response and the
+operation/device/report endpoints. No second feed, no event sourcing,
+no replay machinery, no new event kinds were added.
+
+-----------------------------------------------------------------------
+11. API
+-----------------------------------------------------------------------
+GET /pos/offline/devices/:deviceId/reconciliation   pos:read  200
+GET /pos/offline/sessions/:sessionId/reconciliation  pos:read  200
+Read-only; standard guard chain; NO request body accepted (nothing to
+inject — tenantId/deviceId/storeId/sessionId/cashierId/conflict ids/
+resolution payloads are all impossible by shape); unknown/foreign ids
+-> uniform 404. No generic /reconcile /resolve /conflicts endpoints.
+
+-----------------------------------------------------------------------
+12. SCHEMA / MIGRATION
+-----------------------------------------------------------------------
+NONE. "No migration required — discovery confirmed existing schema is
+sufficient." PosOperation already persists status/resultCode/
+resultOrderId/resultPaymentId/processedAt. No table/column/index/
+constraint added. 19 existing migrations untouched; prisma validate
+valid; migrate status up to date.
+
+-----------------------------------------------------------------------
+13. TESTS + FOCUSED RESULTS
+-----------------------------------------------------------------------
+Unit (src/pos/pos-reconciliation.service.spec.ts — 9/9):
+  fail-closed (device+session); partition with typed codes + seq
+  order + correct query shapes; DUPLICATE reports as ACCEPTED;
+  uniform 404 unknown/foreign device and session (zero follow-up
+  queries); projection exposes exactly the 8 resolution fields (no
+  intent lines, no tenantId leak).
+
+Integration (src/pos/pos-reconciliation.integration.spec.ts — 8/8, real
+AppModule + supertest + real PostgreSQL):
+  - END-TO-END conflict lifecycle: record 3 intents -> sync to
+    ACCEPTED + PRICE_CHANGED + OUT_OF_STOCK -> device report totals
+    0/1/2 with codes ['OUT_OF_STOCK','PRICE_CHANGED'] (seq order) and
+    durable ids; session report anchors the same (D9).
+  - D7-demoted op: 403 at sync -> stays PENDING -> surfaces as pending.
+  - Rejected retry: SAME rejection + intent snapshot bit-for-bit
+    unchanged.
+  - Accepted retry: SAME Order/Payment; repeated reports identical;
+    exactly one payment; stock decremented once.
+  - Concurrent sync: exactly one execution; the report reflects it.
+  - Security: 401 x2; 403 without pos:read; 404 cross-tenant device
+    AND session (uniform, nothing leaked); 403 outsider; 404 unknown.
+  - Device isolation: no cross-device id contamination.
+  - Reconciliation cannot mutate: no body accepted; repeated reads
+    leave the intent snapshot identical.
+
+-----------------------------------------------------------------------
+14. FULL REGRESSION RESULTS (ACTUAL RUNS, 2026-08-31)
+-----------------------------------------------------------------------
+  Focused P4-U7 unit suite       : 9/9 passed
+  Focused P4-U7 integration suite: 1 suite, 8/8 passed
+  Full unit suite (jest.unit.json): 51 suites, 753/753 passed
+                                    (post-P4-U6: 50/744; +1 suite +9)
+  Full integration suite
+  (jest.integration.json)        : 28 suites, 673/673 passed
+                                    (post-P4-U6: 27/665; +1 suite +8;
+                                    every pre-existing suite green —
+                                    P4-U1/U2/U3/U4/U5/U6 verified
+                                    unchanged; the known inventory
+                                    parallel-load flakiness did NOT
+                                    reproduce in this unit's runs)
+  npm run lint                    : 2 errors — both the KNOWN
+                                    PRE-EXISTING asset.service.spec.ts
+                                    :203/:221; zero new issues
+                                    (3 gate-time errors fixed first)
+  npm run build (type-check)     : success
+  npx prettier --check           : all files pass
+  npx prisma validate            : valid
+  npx prisma migrate status      : up to date (19 migrations)
+
+-----------------------------------------------------------------------
+15. KNOWN ISSUES
+-----------------------------------------------------------------------
+PRE-EXISTING (separate from P4-U7; untouched):
+  - src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+  - Inventory concurrent-increment flakiness under parallel suite load
+    (did NOT reproduce in this unit's runs; not claimed fixed).
+
+P4-U7 DEFECTS: none.
+
+-----------------------------------------------------------------------
+16. FILES CHANGED
+-----------------------------------------------------------------------
+Created:
+  src/pos/pos-reconciliation.service.ts / .spec.ts
+  src/pos/pos-reconciliation.integration.spec.ts
+  docs/phase4_p4u7_report.txt (this file)
+Modified:
+  src/pos/pos.controller.ts (+2 read-only routes)
+  src/pos/pos.module.ts (+ PosReconciliationService)
+  docs/phase-progress.md
+
+NO schema, NO migration, NO new RBAC key, NO payment/order/inventory
+logic change.
+
+-----------------------------------------------------------------------
+17. GIT
+-----------------------------------------------------------------------
+(Recorded after the operations succeeded.)
+
+  Commit message  : feat(pos): implement P4-U7 conflict handling and
+                    reconciliation
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS — working tree clean after push
+
+=======================================================================
+FINAL BOUNDARY
+=======================================================================
+  P4-U7 COMPLETE -> DOCUMENTED -> COMMITTED -> PUSHED -> HARD STOP.
+  All offline conflicts are deterministic terminal outcomes; the
+  original intent is immutable; reconciliation is read-only reporting.
+  DO NOT start P4-U8 (Cross-device / Cross-domain Verification) or any
+  later checkpoint. Each requires separate explicit approval.
+=======================================================================

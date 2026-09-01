@@ -3697,3 +3697,130 @@ awaiting explicit user approval.
 
 HARD STOP â€” P4-U6 complete; do not start P4-U7 without explicit approval.
 
+---
+
+## PHASE 4 P4-U7 â€” CONFLICT HANDLING + RECONCILIATION COMPLETE (2026-08-31)
+
+STATUS: **P4-U7 = COMPLETE** (implemented, verified, documented). The
+discovery gate established that all offline conflict classes are ALREADY
+deterministic terminal outcomes under the approved decisions (D3 PRICE_CHANGED
+â€” never silent repricing; D4 OUT_OF_STOCK â€” never partial fulfillment; D7
+authorization revalidated at sync), and that NO manual-resolution /
+re-resolution semantics are approved anywhere. P4-U7 therefore delivered
+exactly what the approved architecture defines reconciliation to be: READ-ONLY
+conflict surfacing + reconciliation REPORTS (the D9 "PosSession anchors
+intent ownership and reconciliation reports" shift report + the P4-U7-line
+"device recovery flows" report) â€” with zero mutation of any original intent.
+No manual resolution, no generic framework, no event sourcing, no new state
+machines, no schema change. P4-U8 NOT started; awaiting explicit user
+approval.
+
+DISCOVERY GATE (all mandated questions, answered from the repository):
+- What is a conflict? An offline operation that cannot be executed as-is
+  at sync: price drift (PRICE_CHANGED), stock shortfall (OUT_OF_STOCK),
+  stale authorization (D7 demotion -> 403, operation stays PENDING),
+  missing/inactive variant, mixed currency, missing price, empty intent.
+  ALL are implemented deterministically by P4-U5.
+- Are they reconciliation conflicts? NO â€” D3/D4 make them TERMINAL
+  deterministic rejections ("never silently repriced"; "reject the
+  operation and mark it as failed/voided"), durably recorded (status
+  REJECTED + typed resultCode).
+- DUPLICATE vs CONFLICT? DUPLICATE is the idempotent replay of an
+  ACCEPTED operation (same durable result returned; never re-executed)
+  â€” NOT a conflict. Already implemented (P4-U4/U5).
+- Retry a rejected op -> different outcome? NO: "a business rejection is
+  never retried into a different outcome" (pos-sync.service.ts:110-111).
+  Integration re-proven this unit.
+- Reverse an accepted op? NO â€” no refund/reversal exists anywhere
+  (frozen); an accepted op's Order/Payment ids are permanent.
+- Reconciliation semantics? From the repository: reports + surfacing
+  ONLY. The discovery D9 names PosSession as the anchor for
+  "reconciliation reports"; the P4-U7 line is "stock conflicts at sync
+  (409 semantics), price authority decision, stale-authorization
+  rejections, device recovery flows" â€” i.e. CONFLICT HANDLING is the
+  deterministic sync outcome (done in U5), and RECONCILIATION is its
+  durable report.
+- Automatic vs manual resolution? All AUTOMATIC via the existing
+  deterministic rules; NO manual-resolution policy is approved anywhere
+  (checked D1-D8, the P4-U7 line, Q10/Q14 notes). Per instruction 8
+  (STOP if not approved): manual resolution is NOT invented â€” out of
+  scope. No correction policy exists, therefore nothing may reprice,
+  reduce quantity, change variant/cashier/store/session/payment method.
+- Who may reconcile(read)? The existing pos:read key (reports are staff/
+  device views). No new RBAC permission created.
+- Immutable for audit: clientUuid, deviceId, seq, tenantId, storeId,
+  sessionId, cashierId, createdAt, the frozen intent items + observed
+  prices, and once written, the durable result (status/resultCode/
+  resultOrderId/resultPaymentId). NOTHING may be corrected/annotated â€”
+  proven bit-for-bit by the integration suite (intentSnapshot comparison
+  after every read/retry).
+- Can the feed need more? NO â€” results are visible via the operation/
+  device endpoints; no new feed event type required (no speculative
+  events).
+- Schema change required? NO â€” "No migration required â€” discovery
+  confirmed existing schema is sufficient." PosOperation already holds
+  every resolution field. 19 migrations unchanged.
+
+IMPLEMENTATION (minimal, read-only):
+- src/pos/pos-reconciliation.service.ts (NEW): getDeviceReconciliation
+  (the device recovery flow: PENDING ops to re-sync, ACCEPTED with
+  durable Order/Payment ids, REJECTED with typed codes â€” ordered by the
+  device's seq) + getSessionReconciliation (the D9 shift report with
+  session/device/store/cashier provenance). Pure tenant-scoped reads;
+  projections expose ONLY identity + resolution (no intent lines, no
+  tenant fields); zero writes anywhere.
+- src/pos/pos.controller.ts (+2 routes: GET
+  /pos/offline/devices/:deviceId/reconciliation and GET
+  /pos/offline/sessions/:sessionId/reconciliation, both pos:read; the
+  standard guard chain; NO body accepted â€” nothing to inject).
+- src/pos/pos.module.ts (PosReconciliationService wired + exported).
+
+TESTS ADDED:
+- src/pos/pos-reconciliation.service.spec.ts (9 unit): fail-closed x2;
+  partition (PENDING/ACCEPTED/REJECTED with typed codes, seq order,
+  correct findMany shapes); DUPLICATE reports as ACCEPTED (durable
+  result); uniform 404 unknown/foreign device/session with zero queries;
+  the projection exposes exactly 8 fields (no items/tenantId leak).
+- src/pos/pos-reconciliation.integration.spec.ts (8 integration, real
+  AppModule + real PostgreSQL): END-TO-END conflict lifecycle â€” record
+  intents, sync to ACCEPTED + PRICE_CHANGED + OUT_OF_STOCK, then the
+  device report partitions all of them (totals 0/1/2, typed codes
+  ['OUT_OF_STOCK','PRICE_CHANGED'], durable ids, seq order) and the
+  session report anchors the same (D9); D7-demoted PENDING op surfaces
+  as pending; rejected retry -> SAME rejection with the intent snapshot
+  BIT-FOR-BIT UNCHANGED; accepted retry -> SAME Order/Payment, repeated
+  reports identical, exactly one payment, stock decremented once;
+  CONCURRENT sync -> exactly one execution reflected in the report;
+  security matrix (401/403 no-pos:read/404 cross-tenant device+session
+  uniform/404 unknown/403 outsider); device isolation (no id cross-
+  contamination); reconciliation-cannot-mutate (no body accepted,
+  repeated reads leave the intent snapshot identical).
+
+VERIFICATION RESULTS (exact, actual runs, full gate re-run after lint
+fixes):
+- Focused P4-U7: unit 9/9; integration 8/8.
+- Full unit suite (jest.unit.json): 51 suites, 753/753 passed
+  (was 50/744 post-P4-U6; +1 suite +9 tests exactly).
+- Full integration suite (jest.integration.json): 28 suites, 673/673
+  passed (was 27/665; +1 suite +8 tests exactly; every pre-existing
+  suite green â€” P4-U1/U2/U3/U4/U5/U6 all pass unchanged; the known
+  inventory parallel-load flakiness did NOT reproduce in either run).
+- npm run format / npx prettier --check: clean.
+- npm run lint: 2 problems â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221. Zero new lint issues (3 new
+  errors found during the gate were fixed before recording results).
+- npm run build (nest build): success.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (19 migrations â€” UNCHANGED; no migration created, discovery-justified).
+
+P4-U4/U5/U6 INVARIANTS RE-VERIFIED (not weakened): UNIQUE(deviceId,
+clientUuid) + per-device seq untouched; idempotent sync + concurrent
+exactly-once re-proven; the P4-U6 cash-only boundary untouched (no
+payment code changed at all); immutable provenance proven bit-for-bit
+after every reconciliation read and retry.
+
+NEXT CHECKPOINT: P4-U8 â€” Cross-device / Cross-domain Verification.
+NOT started; awaiting explicit user approval.
+
+HARD STOP â€” P4-U7 complete; do not start P4-U8 without explicit approval.
+

@@ -8,6 +8,7 @@ import { PosSessionService } from './pos-session.service';
 import { PosSaleService } from './pos-sale.service';
 import { PosOperationService } from './pos-operation.service';
 import { PosSyncService } from './pos-sync.service';
+import { PosReconciliationService } from './pos-reconciliation.service';
 import { PosController } from './pos.controller';
 
 @Module({
@@ -19,6 +20,7 @@ import { PosController } from './pos.controller';
     PosSaleService,
     PosOperationService,
     PosSyncService,
+    PosReconciliationService,
   ],
   exports: [
     PosDeviceService,
@@ -26,6 +28,7 @@ import { PosController } from './pos.controller';
     PosSaleService,
     PosOperationService,
     PosSyncService,
+    PosReconciliationService,
   ],
 })
 export class PosModule {}

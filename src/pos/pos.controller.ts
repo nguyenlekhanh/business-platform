@@ -45,6 +45,11 @@ import {
   PosOperationService,
 } from './pos-operation.service';
 import { FeedPage, PosSyncService, SyncResult } from './pos-sync.service';
+import {
+  DeviceReconciliationReport,
+  PosReconciliationService,
+  SessionReconciliationReport,
+} from './pos-reconciliation.service';
 
 /**
  * POS foundation endpoints — Phase 4 P4-U1.
@@ -76,6 +81,7 @@ export class PosController {
     private readonly saleService: PosSaleService,
     private readonly operationService: PosOperationService,
     private readonly syncService: PosSyncService,
+    private readonly reconciliationService: PosReconciliationService,
   ) {}
 
   // ---- Devices ---------------------------------------------------------
@@ -282,5 +288,42 @@ export class PosController {
     @Query('since', new ParseIntPipe({ optional: true })) since = 0,
   ): Promise<FeedPage> {
     return this.syncService.pullFeed(since);
+  }
+
+  // ---- Reconciliation reports (P4-U7: read-only conflict surfacing) ---
+
+  /**
+   * Device-level reconciliation report (the device recovery flow):
+   * PENDING operations to (re-)sync, ACCEPTED with durable ids, and every
+   * REJECTED operation with its typed deterministic reason. READ-ONLY —
+   * reconciliation never mutates an operation or its original intent.
+   */
+  @Get('offline/devices/:deviceId/reconciliation')
+  @RequirePermission(PERMISSIONS.POS_READ)
+  @ApiOperation({
+    summary:
+      'Device reconciliation report: durable resolution of every offline operation (read-only)',
+  })
+  getDeviceReconciliation(
+    @Param('deviceId') deviceId: string,
+  ): Promise<DeviceReconciliationReport> {
+    return this.reconciliationService.getDeviceReconciliation(deviceId);
+  }
+
+  /**
+   * Session-level (shift) reconciliation report — per approved D9,
+   * PosSession anchors intent ownership and reconciliation reports.
+   * READ-ONLY projection of the same durable resolutions per shift.
+   */
+  @Get('offline/sessions/:sessionId/reconciliation')
+  @RequirePermission(PERMISSIONS.POS_READ)
+  @ApiOperation({
+    summary:
+      'Session (shift) reconciliation report: durable resolution of its offline operations (read-only)',
+  })
+  getSessionReconciliation(
+    @Param('sessionId') sessionId: string,
+  ): Promise<SessionReconciliationReport> {
+    return this.reconciliationService.getSessionReconciliation(sessionId);
   }
 }
