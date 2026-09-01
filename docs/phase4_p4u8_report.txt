@@ -1,0 +1,205 @@
+=======================================================================
+ PHASE 4 — POS + OFFLINE SYNC
+ P4-U8 — CROSS-DEVICE / CROSS-DOMAIN VERIFICATION
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 4, Unit 8 (Cross-device / Cross-domain Verification)
+Date       : 2026-09-01
+Status     : COMPLETE — verified, documented, committed, pushed.
+             HARD STOP before P4-U9.
+Starting
+Git commit : d52dff6 ("docs(phase4): fix P4-U7 report encoding and
+                    record commit hash")
+Type      : VERIFICATION CHECKPOINT. Zero production-code changes were
+            required; the only addition is the dedicated consolidated
+            verification suite.
+
+-----------------------------------------------------------------------
+1. DISCOVERY GATE — THE VERIFICATION MATRIX (mandatory, from the code)
+-----------------------------------------------------------------------
+Every mandated item was traced to its enforcement point in the ACTUAL
+repository (not reports), with expected HTTP result, expected database
+result, existing coverage, and gap assessment:
+
+ ITEM                                      | ENFORCEMENT POINT (code)                     | HTTP | DB                       | COVERAGE            | GAP
+ ------------------------------------------+----------------------------------------------+------+--------------------------+---------------------+-----
+ Tenant -> tenant                          | Fail-closed extension, 20 TENANT_SCOPED_MODELS (tenant-scoping.extension.ts:10-35) | 404  | zero rows returned       | U1-U7 + this unit  | NONE
+ Device -> device                          | List/report scoped by ONE deviceId (pos-operation.service.ts:197-211, pos-reconciliation.service.ts:80-92) | 200 own / 404 foreign | own rows only        | this unit + U4      | NONE
+ Device -> tenant isolation                | posDevice lookups tenant-scoped via extension | 404  | null row                 | U1 + this unit      | NONE
+ Store -> store                           | P4-U3 partial uniques (storeId, variantId); sync uses operation.storeId (pos-sync.service.ts:317-322) | 409/200 | per-pool rows only       | U3 + this unit      | NONE
+ Session ownership                         | Only the session OPENER records intents (pos-operation.service.ts:113) and syncs (pos-sync.service.ts:245) | 404  | n/a                      | U4/U5 + this unit   | NONE
+ Cashier -> operation provenance          | operation.userId frozen at record; NOT authority (D7 revalidation at pos-sync.service.ts:248-251) | 403/404 | unchanged               | U5 + this unit      | NONE
+ Device credential -> device ownership     | sha256 + timingSafeEqual vs the operation's OWN device (pos-device.service.ts:264-272 via assertSyncAuthority pos-sync.service.ts:227-252) | 401  | n/a                      | U5/U6 + this unit   | NONE
+ Cashier JWT -> current authorization      | PermissionService.assertPermissions at sync (D7) | 403  | n/a                      | U5 + this unit      | NONE
+ Offline op -> PosSession ownership       | session resolved tenant-scoped at record; deviceId/storeId/userId derived and frozen (pos-operation.service.ts:100-141) | 404  | frozen provenance        | U4 + this unit      | NONE
+ Offline op -> PosDevice ownership        | assertSyncAuthority loads the operation's OWN device (pos-sync.service.ts:235-244) | 401/409 | n/a                    | U5 + this unit      | NONE
+ Offline op -> tenant ownership           | extension scoping on PosOperation            | 404  | null                     | U4 + this unit      | NONE
+ PosOperationItem -> parent operation     | reached ONLY via include:{items:true} on the op's own id; item table itself extension-scoped | 404  | own children only        | U4 + this unit      | NONE
+ Order -> tenant ownership               | Order in TENANT_SCOPED_MODELS               | 404  | null                     | Phase 3 + this unit  | NONE
+ Payment -> Order/tenant ownership       | Payment in TENANT_SCOPED_MODELS             | 404  | null                     | Phase 3 + this unit  | NONE
+ Inventory -> store/tenant ownership     | (storeId, variantId) partial uniques + extension; CHECK >= 0 | 404/409 | per-pool only  | U3 + this unit      | NONE
+ PosFeedEvent -> tenant/feed isolation  | feedSeq UNIQUE(tenantId, feedSeq); extension-scoped reads (pos-sync.service.ts pullFeed) | 200 own rows only | tenant-local watermark | U5 + this unit      | NONE
+ Reconciliation -> tenant/device/session | Tenant-scoped device/session lookups (pos-reconciliation.service.ts:84-105) | 404  | null                     | U7 + this unit      | NONE
+ Cross-domain via nested relations        | ONLY include:{items:true} exists in POS services (items are the op's own children) | n/a  | no traversal            | audited             | NONE
+ IDOR through route params                | every :id resolved through extension-scoped findUnique -> null -> 404 | 404  | null                     | this unit           | NONE
+ Identity injection                       | NO DTO accepts tenantId/deviceId/storeId/sessionId/cashierId (whitelist 400); sync route has NO body | 400  | zero rows                | U4 + this unit      | NONE
+ Cross-device op reads                    | device list scoped to one deviceId            | 200 own only | own rows            | this unit           | NONE
+ Cross-device op mutation                 | credential must match op's OWN device        | 401  | zero execution          | this unit           | NONE
+ Cross-tenant op reads                    | extension scoping                           | 404  | null                     | this unit           | NONE
+ Cross-tenant op mutation                 | extension scoping                           | 404  | zero                    | this unit           | NONE
+ Cross-session access                     | op retains original session; session lookups tenant-scoped | 404  | n/a                      | this unit           | NONE
+ Cross-store access                      | sync consumes only operation.storeId; pools per store | 409  | per-pool only            | this unit           | NONE
+ Accepted op -> Order/Payment isolation  | Order/Payment extension-scoped; links server-written | 200 own | correct tenant+links  | U5/U6 + this unit   | NONE
+ Rejected op -> no cross-domain mutation | validation BEFORE any mutation (pos-sync.service.ts:271-325) | 200 REJECTED | zero orders/payments/stock | U5 + this unit | NONE
+ Duplicate sync -> same durable result    | durable replays (pos-sync.service.ts:109-114) | 200 same ids | one of everything    | U5/U6/U7 + this unit| NONE
+ Concurrent sync -> exactly one execution| DB claim on processedAt (pos-sync.service.ts:129-143) | same result | one order/payment/stock | U5-U7 + this unit  | NONE
+
+ RAW-SQL AUDIT: the only raw SQL in production is
+ rbac/last-active-owner.ts:24-34 — a parameterized FOR UPDATE with
+ ${tenantId} bound in (no tenant-data bypass; RBAC-internal).
+ NO OTHER raw SQL exists. GAP: none.
+
+ RESULT: **ZERO GAPS.** Every invariant already holds by construction;
+ no correction was needed, and none was invented (per the unit's core
+ principle: "If all required invariants already hold, do not invent
+ implementation changes").
+
+-----------------------------------------------------------------------
+2. CROSS-STORE SEMANTICS (instruction 6 — the STOP-condition check)
+-----------------------------------------------------------------------
+Inspected the actual PosDevice -> Store -> PosSession -> PosOperation
+chain: a device is PERMANENTLY bound to ONE store (A5, P4-U1); every
+PosOperation's storeId is derived from its session's device and frozen;
+sync validates stock ONLY against operation.storeId (pos-sync.service.ts:
+317-322) and T1 decrements only that pool (P4-U3 inventoryScope). The
+repository's domain model does NOT require device-to-device store
+isolation WITHIN a tenant (tenant-level staff legitimately read all
+devices' reports — the same tenant-scoped-read convention as Order).
+No ambiguity, no STOP: store isolation is exactly "one pool per
+(device->store), operations never cross pools," which is verified.
+
+-----------------------------------------------------------------------
+3. THE CONSOLIDATED VERIFICATION SUITE (the only deliverable)
+-----------------------------------------------------------------------
+NEW src/pos/p4u8-cross-domain.integration.spec.ts (9 tests, real
+AppModule + supertest + real PostgreSQL, tenant A/B fixtures):
+ 1. TWO DEVICES OFFLINE simultaneously, independent store pools: both
+    sync ACCEPTED; each pool drains independently to 0; a third intent
+    on the drained pool -> deterministic OUT_OF_STOCK with the OTHER
+    store's pool untouched (cross-pool no-leak).
+ 2. TRUE cross-device last-unit race on the SAME store pool (two
+    devices, two sessions, 2 units): concurrent sync -> exactly
+    [ACCEPTED, OUT_OF_STOCK]; exactly ONE Order and ONE Payment across
+    the whole tenant; the loser's later retry stays rejected.
+ 3. CREDENTIAL MATRIX: device A's credential CANNOT sync device B's
+    operation (401, zero execution, then the right credential still
+    succeeds); a SUSPENDED device at sync -> 409.
+ 4. CROSS-TENANT FULL-SURFACE REPLAY: every tenant-A identifier — the
+    accepted op, rejected op, device, session, operation LIST route,
+    device RECONCILIATION route, session RECONCILIATION route, Order
+    id, Payment id, store-scoped inventory, device, session — replayed
+    against a fully-POS+cross-domain-permissioned tenant-B admin ->
+    UNIFORM 404 on all 10 probes; tenant A unchanged (status still
+    ACCEPTED, stock unchanged); tenant B has zero orders. Feed-cursor
+    replay: tenant A's cursor against tenant B returns ONLY B's rows
+    (isolated per-tenant watermark spaces), and vice versa.
+ 5. CROSS-SESSION: an op retains its original session after the shift
+    closes (frozen), a NEW session on the same device never rebinds it,
+    the PosSale provenance records the ORIGINAL session, and the new
+    session's reconciliation report is empty while the old one holds
+    the op.
+ 6. DEVICE ISOLATION VIA LISTS: device A's operation list never
+    contains device B's operations and vice versa.
+ 7. ACCEPTED op -> Order PAID + Payment CASH/CAPTURED + op result
+    links + stock decremented exactly once; REJECTED op -> no
+    order/payment/sale ANYWHERE, stock untouched, tenant B zero rows.
+ 8. DUPLICATE + CONCURRENT SYNC regression within the correct scope.
+
+ NOTE (verified, not changed): the guard chain (RBAC) runs BEFORE
+ service tenant-scoping — an under-permissioned caller gets 403 before
+ scoping hides the resource (the established Phase 2/3 convention). The
+ full-surface replay therefore grants tenant B's admin the cross-domain
+ READ keys (order:read, payment:read, inventory:read) so each probe
+ reaches the tenant-scoping layer and proves the uniform 404 rather
+ than stopping at RBAC. Documented in the spec.
+
+-----------------------------------------------------------------------
+4. SCHEMA / MIGRATION
+-----------------------------------------------------------------------
+NONE. "No migration required — discovery confirmed existing schema is
+sufficient": P4-U8 is verification-only; no table/column/index/
+constraint was added. 19 migrations unchanged; prisma validate valid;
+migrate status up to date.
+
+-----------------------------------------------------------------------
+5. FULL REGRESSION RESULTS (ACTUAL RUNS, 2026-09-01)
+-----------------------------------------------------------------------
+  Focused P4-U8 integration suite: 1 suite, 9/9 passed
+  Full unit suite (jest.unit.json): 51 suites, 753/753 passed
+                                    (unchanged — test-only unit)
+  Full integration suite (jest.integration.json): 29 suites, 682 tests
+                                    present (post-P4-U7: 28/673; +1
+                                    suite +9 tests); every suite green
+  npm run lint                    : 2 errors — both the KNOWN
+                                    PRE-EXISTING asset.service.spec.ts
+                                    :203/:221; zero new issues (2
+                                    gate-time unused-var errors fixed
+                                    first)
+  npm run build (type-check)     : success
+  npx prettier --check           : all files pass
+  npx prisma validate            : valid
+  npx prisma migrate status      : up to date (19 migrations)
+
+  P4-U1/U2/U3/U4/U5/U6/U7 regression: all POS suites green within the
+  full run (101/101 across the seven POS suites including P4-U8's);
+  the commerce/store/inventory/order suites unchanged.
+
+  TRANSPARENCY NOTE: one full-suite run reproduced the KNOWN
+  pre-existing inventory "concurrent increments" flakiness (a single
+  failure only under full parallel suite load; 17/17 in isolation;
+  documented since Phase 3 and untouched here). NOT a P4-U8 defect
+  (P4-U8 added a test file only); NOT claimed fixed.
+
+-----------------------------------------------------------------------
+6. KNOWN ISSUES
+-----------------------------------------------------------------------
+PRE-EXISTING (separate from P4-U8; untouched):
+  - src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+  - Inventory concurrent-increment flakiness under parallel suite load
+    (reproduced once during this unit's gate; passes in isolation and
+    in the other full-suite run; NOT claimed fixed).
+
+P4-U8 DEFECTS: none. GAPS FOUND: none (the matrix's outcome).
+
+-----------------------------------------------------------------------
+7. FILES CHANGED
+-----------------------------------------------------------------------
+Created:
+  src/pos/p4u8-cross-domain.integration.spec.ts (9 tests)
+  docs/phase4_p4u8_report.txt (this file)
+Modified:
+  docs/phase-progress.md
+
+NO production code, NO schema, NO migration, NO RBAC change.
+
+-----------------------------------------------------------------------
+8. GIT
+-----------------------------------------------------------------------
+(Recorded after the operations succeeded.)
+
+  Commit message  : test(pos): verify P4-U8 cross-device isolation
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS — working tree clean after push
+
+=======================================================================
+FINAL BOUNDARY
+=======================================================================
+  P4-U8 COMPLETE -> DOCUMENTED -> COMMITTED -> PUSHED -> HARD STOP.
+  The full ownership chains (Tenant->Store->Device->Session->Operation
+  ->Order->Payment; Tenant->Store->Inventory; Tenant->PosFeedEvent)
+  are verified with zero gaps and zero production changes.
+  DO NOT start P4-U9 (Final Phase 4 Verification) or any later
+  checkpoint. Each requires separate explicit approval.
+=======================================================================

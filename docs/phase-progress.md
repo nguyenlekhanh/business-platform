@@ -3824,3 +3824,131 @@ NOT started; awaiting explicit user approval.
 
 HARD STOP â€” P4-U7 complete; do not start P4-U8 without explicit approval.
 
+---
+
+## PHASE 4 P4-U8 â€” CROSS-DEVICE / CROSS-DOMAIN VERIFICATION COMPLETE (2026-09-01)
+
+STATUS: **P4-U8 = COMPLETE** (verified, documented). P4-U8 is a VERIFICATION
+checkpoint: the discovery gate built the mandated ownership/isolation matrix
+from the actual repository code and found **ZERO gaps** â€” every enforcement
+point already exists and holds (fail-closed tenant extension across 20
+scoped models; device-credential vs operation-device constant-time check;
+session-opener cashier binding; store-pool scoping; reconciliation/report
+tenant scoping; feed per-tenant watermarks). NO production code changed; the
+only addition is the dedicated consolidated verification suite proving the
+cross-device/cross-domain invariants end to end. NO schema change (19
+migrations unchanged). P4-U9 NOT started; awaiting explicit user approval.
+
+VERIFICATION MATRIX (mandated; enforcement point -> expected HTTP -> expected
+DB -> existing coverage -> gap):
+- Tenant->tenant: fail-closed extension on all 20 TENANT_SCOPED_MODELS
+  (tenant-scoping.extension.ts:10-35); uniform 404; -> covered (U1-U7
+  suites + this unit's full-surface replay). GAP: none.
+- Device->device: list/report scoped by one deviceId (pos-operation/
+  reconciliation services); cross-device credential => 401 (sync asserts
+  the credential against the operation's OWN device). Covered. GAP: none.
+- Device->tenant / tenant->device: device lookups tenant-scoped => 404.
+  Covered. GAP: none.
+- Store->store: P4-U3 partial unique (storeId, variantId) pools; sync
+  consumes only operation.storeId. Covered. GAP: none.
+- Session ownership: only the session opener records intents (P4-U4) and
+  syncs (P4-U5 asserts operation.userId === principal). Covered. GAP: none.
+- Cashier->provenance: operation.userId frozen at record; NOT execution
+  authority (D7 revalidated). Covered. GAP: none.
+- Credential->device: sha256 + timingSafeEqual vs the op's OWN device.
+  Covered. GAP: none.
+- JWT->current authorization: PermissionService at sync time. Covered.
+  GAP: none.
+- Operation->session/device/tenant ownership: derived from the referenced
+  session at record, immutable. Covered. GAP: none.
+- PosOperationItem->parent: reached ONLY via operationId include; item
+  table itself in TENANT_SCOPED_MODELS. Covered. GAP: none.
+- Order/Payment->tenant: extension scoping (Order/Payment in set).
+  Covered. GAP: none.
+- Inventory->store/tenant: (storeId, variantId) partial uniques + CHECK.
+  Covered. GAP: none.
+- PosFeedEvent->tenant/feed: feedSeq UNIQUE per tenant; extension-scoped
+  reads. Covered. GAP: none.
+- Reconciliation->tenant/device/session: tenant-scoped lookups => 404.
+  Covered. GAP: none.
+- Nested-relation cross-domain access: `include: { items: true }` only;
+  items are the op's own children (no cross-tenant traversal). No other
+  includes exist in POS services. GAP: none.
+- Route-param IDOR: every :id resolved tenant-scoped => 404 (uniform, no
+  oracle). Covered by the full-surface replay. GAP: none.
+- Identity injection: no DTO accepts tenantId/deviceId/storeId/sessionId/
+  cashierId (whitelist 400; sync route takes no body). Covered. GAP: none.
+- Accepted op->Order/Payment isolation: verified (one order/payment,
+  correct tenant/provenance). Rejected op->zero cross-domain mutation:
+  verified (direct row counts). GAP: none.
+- Duplicate sync->same durable result; concurrent sync->exactly one
+  execution: covered (U5/U6 + this unit's race). GAP: none.
+- Raw SQL audit: the ONLY raw SQL is last-active-owner's FOR UPDATE
+  (parameterized tenantId, no tenant-data bypass). GAP: none.
+
+VERIFICATION DELIVERED (no production change): src/pos/
+p4u8-cross-domain.integration.spec.ts (9 tests, real AppModule + real
+PostgreSQL):
+1. Two devices offline simultaneously, independent store pools: both
+   ACCEPT, each pool drains independently; a third intent on the drained
+   pool -> deterministic OUT_OF_STOCK, the OTHER store's pool untouched.
+2. TRUE cross-device last-unit race on the SAME store pool (2 devices,
+   2 units): concurrent sync -> exactly [ACCEPTED, OUT_OF_STOCK]; ONE
+   Order, ONE Payment across the whole tenant; the loser's retry stays
+   rejected deterministically.
+3. Credential matrix: device A's credential CANNOT sync device B's
+   operation (401, zero execution); suspended device at sync -> 409.
+4. Cross-tenant FULL-SURFACE replay: EVERY tenant-A identifier (accepted
+   op, rejected op, device, session, operation list, device
+   reconciliation, session reconciliation, Order id, Payment id, store
+   inventory, device, session) replayed against a fully-permissioned
+   tenant-B admin -> uniform 404 across all 10 probes, zero mutation of
+   tenant A, zero rows in tenant B; tenant-A feed cursor replayed
+   against tenant B -> only B's own rows (isolated watermark spaces),
+   and vice versa.
+5. Cross-session: op retains its original session after close (never
+   rebound); PosSale provenance records the ORIGINAL session; the new
+   session's report is empty while the old one holds the op.
+6. Device isolation via lists: device A's list never contains device B's
+   operations and vice versa.
+7. Accepted op -> Order PAID + Payment CASH/CAPTURED + operation links
+   + stock decremented exactly once; rejected op -> NO order/payment/
+   sale anywhere, stock untouched; tenant B: zero rows.
+8. Duplicate + concurrent sync regression within the correct scope.
+
+NOTE ON RBAC-vs-SCOPING ORDER (verified, not changed): the guard chain
+(RBAC) runs BEFORE service tenant scoping, so a caller lacking order:read
+gets 403 before scoping â€” the established Phase 2/3 convention. The
+full-surface replay therefore grants tenant B's admin the cross-domain
+read keys so the probes reach the tenant-scoping layer and prove the
+uniform 404 (documented in the spec).
+
+VERIFICATION RESULTS (exact, actual runs, full gate):
+- Focused P4-U8 suite: 9/9 passed.
+- Full unit suite (jest.unit.json): 51 suites, 753/753 passed (unchanged
+  by P4-U8 â€” test-only unit).
+- Full integration suite (jest.integration.json): 29 suites, 682 tests
+  present; every suite green (was 28/673 post-P4-U7; +1 suite +9
+  tests). TRANSPARENCY: one full-suite RUN reproduced the KNOWN
+  pre-existing inventory concurrent-increment flakiness (1 failure under
+  full parallel load; 17/17 in isolation; pre-existing since Phase 3;
+  NOT claimed fixed, NOT a P4-U8 defect).
+- npm run format / npx prettier --check: clean.
+- npm run lint: 2 problems â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221. Zero new lint issues (2
+  gate-time unused-var errors fixed before recording).
+- npm run build (nest build): success.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (19 migrations â€” UNCHANGED; no migration required: verification-only
+  unit, discovery-confirmed).
+
+P4-U1..U7 REGRESSION: all POS suites green within the full run (101/101
+across the seven POS suites incl. the new P4-U8 suite); U8/U9/store/
+inventory/order/payment/cart suites unchanged.
+
+NEXT CHECKPOINT: P4-U9 â€” Final Phase 4 Verification (audit + full
+regression + docs closure), mirroring the Phase 3 U9 gate. NOT started;
+awaiting explicit user approval.
+
+HARD STOP â€” P4-U8 complete; do not start P4-U9 without explicit approval.
+
