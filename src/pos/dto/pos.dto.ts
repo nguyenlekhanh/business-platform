@@ -6,6 +6,8 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -105,6 +107,70 @@ export class CreatePosSaleDto {
   @IsOptional()
   @IsIn(['CASH', 'CARD'])
   method!: 'CASH' | 'CARD';
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  customerId?: string;
+}
+
+/**
+ * Offline sale-intent line — Phase 4 P4-U4. The device reports the variant,
+ * quantity, and the price it OBSERVED at sale time (integer minor units,
+ * BigInt input validated to Number.MAX_SAFE_INTEGER per the established
+ * Price DTO convention). observedUnitAmountMinor is a frozen snapshot used
+ * ONLY for D3 PRICE_CHANGED detection at sync — the server is the price
+ * authority and never reprices silently.
+ */
+export class OfflineSaleIntentItemDto {
+  @IsString()
+  @IsNotEmpty()
+  variantId!: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(1_000_000)
+  quantity!: number;
+
+  @IsString()
+  @Matches(/^[A-Z]{3}$/)
+  currency!: string;
+
+  @IsInt()
+  @Min(0)
+  @Max(Number.MAX_SAFE_INTEGER)
+  observedUnitAmountMinor!: number;
+}
+
+/**
+ * Record an offline sale intent — Phase 4 P4-U4 (the durable sync inbox).
+ *
+ * The device supplies its OUTBOX identity: sessionId (the shift the sale
+ * happened in — OPEN or CLOSED historical record; U5 decides acceptability),
+ * its client-generated idempotency UUID, its per-device outbox sequence
+ * number (> 0, device-assigned), and the frozen intent lines. The server
+ * derives tenant from context and device/store/cashier from the session —
+ * provenance is NEVER client-writable. Optional customerId (walk-in sales
+ * are the documented Phase 3 rule). Recording executes NOTHING (no Order,
+ * Payment, Inventory, or Cart mutation — that is P4-U5).
+ */
+export class RecordOfflineSaleIntentDto {
+  @IsString()
+  @IsNotEmpty()
+  sessionId!: string;
+
+  @IsUUID()
+  clientUuid!: string;
+
+  @IsInt()
+  @Min(1)
+  seq!: number;
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => OfflineSaleIntentItemDto)
+  items!: OfflineSaleIntentItemDto[];
 
   @IsOptional()
   @IsString()

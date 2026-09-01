@@ -1,0 +1,277 @@
+=======================================================================
+ PHASE 4 — POS + OFFLINE SYNC
+ P4-U4 — OFFLINE OPERATION MODEL
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 4, Unit 4 (Offline Operation Model)
+Date       : 2026-08-31
+Status     : COMPLETE — implemented, verified, documented, committed,
+             pushed. HARD STOP before P4-U5.
+Starting
+Git commit : 5cf5b7f ("feat(inventory): implement P4-U3 multi-store
+                    inventory")
+Governing
+decisions : D1–D8 (frozen; see docs/phase4_discovery_report.txt §16) and
+             the discovery §10 PosOperation sketch (UNIQUE(deviceId,
+             clientUuid) + UNIQUE(deviceId, seq)).
+
+-----------------------------------------------------------------------
+1. SCOPE
+-----------------------------------------------------------------------
+The DURABLE DATA MODEL for offline sale intents — the sync inbox P4-U5
+will process. Explicitly NOT implemented (later units): the sync protocol
+itself, executing intents (no Order/Payment/Inventory/Cart mutation at
+record time), reconciliation, offline payment processing, and the pull
+feed. Core principle honored: this is a representation, not an engine.
+
+-----------------------------------------------------------------------
+2. EXACT MODEL
+-----------------------------------------------------------------------
+PosOperation (the parent ledger row — one per offline intent):
+  id cuid PK          — server PK; the client UUID is NEVER a PK
+  tenantId            — server-derived (tenant-scoping extension)
+  deviceId            — derived from the session (immutable provenance)
+  sessionId           — the shift the sale happened in; RETAINED even
+                        after the session closes (U5 decides acceptability)
+  storeId             — denormalized from the device (immutable provenance)
+  userId              — cashier = the session opener at record time
+  clientUuid (UUID)   — the DEVICE-GENERATED idempotency key
+  seq Int (>0 CHECK)  — the device-assigned outbox order (per device)
+  type                — PosOperationType: SALE_INTENT (D1: the ONLY
+                        offline operation type)
+  status              — PosOperationStatus: PENDING at record;
+                        ACCEPTED/DUPLICATE/REJECTED are P4-U5 outcomes.
+                        Describes the SYNC operation ONLY — never an
+                        Order/Payment state.
+  resultCode String?  — typed deterministic sync reason (PRICE_CHANGED,
+                        OUT_OF_STOCK, authorization rejections) — a
+                        typed code field, NOT a free-form error blob.
+  resultOrderId /     — set by P4-U5 when the intent executes
+  resultPaymentId       (FK SET NULL: the ledger row survives link removal)
+  customerId String?  — optional walk-in customer reference (validated at
+                        sync; Order.customerId is nullable per Phase 3)
+  processedAt?        — set by P4-U5
+  createdAt/updatedAt — createdAt = when the SERVER received the push
+
+PosOperationItem (the frozen intent lines — normalized, NOT a JSON blob):
+  id, tenantId, operationId (CASCADE), variantId, quantity (>0 CHECK),
+  currency CHAR(3), observedUnitAmountMinor BIGINT (>=0 CHECK).
+
+UNIQUE constraints (the database is the final authority):
+  UNIQUE(deviceId, clientUuid) — THE idempotency arbitration
+  UNIQUE(deviceId, seq)        — per-device sequence arbitration
+
+-----------------------------------------------------------------------
+3. SEQUENCE ALLOCATION DESIGN
+-----------------------------------------------------------------------
+The device assigns seq offline as part of its outbox (the approved
+discovery §4 model). The server NEVER allocates, increments, or stores a
+counter: there is no read-then-increment window, no application memory,
+and no server-side sequence authority. Duplicate allocation is prevented
+by UNIQUE(deviceId, seq): a second, different operation claiming an
+already-used seq fails at the DB with P2002, which the service maps to
+the deterministic 409 'Device sequence number already used by another
+operation'. Concurrency-safe by construction (the same
+constraint-arbitration philosophy as the inventory guarded update and the
+one-open-session partial index).
+
+-----------------------------------------------------------------------
+4. IDEMPOTENCY
+-----------------------------------------------------------------------
+  - Fundamental rule implemented: UNIQUE(deviceId, clientUuid).
+  - clientUuid is an idempotency key ONLY — never a PK, never an FK
+    target, never a tenant/store selector; entity PKs stay server cuids.
+  - Duplicate push (concurrent OR sequential): the insert hits P2002; the
+    service discriminates WHICH index tripped via error.meta.target and
+    returns the ORIGINAL durable row — at-least-once delivery,
+    exactly-once effect (the established re-capture idempotent-success
+    philosophy). Integration tests prove two concurrent pushes produce
+    exactly ONE row (and one line set) with both callers receiving the
+    same id.
+  - Degenerate case (P2002 but the original row cannot be found): 409 —
+    the service never invents a row.
+
+-----------------------------------------------------------------------
+5. PROVENANCE
+-----------------------------------------------------------------------
+  - tenant: server-derived from the fail-closed AsyncLocalStorage context.
+  - device/store/cashier: DERIVED from the referenced PosSession and
+    frozen at record time (immutable; never client-writable). The
+    operation RETAINS the session identity after the session CLOSES —
+    no rebinding to a newer session; U5 decides whether the historical
+    session/authorization conditions are acceptable.
+  - cashier binding: only the session OPENER may record intents for the
+    shift (a different member gets the same uniform 404 — identical to
+    the online sale's binding).
+  - The only client-supplied identity is the outbox pair (clientUuid,
+    seq) plus the intent content.
+
+-----------------------------------------------------------------------
+6. PAYLOAD
+-----------------------------------------------------------------------
+  - Normalized typed lines (PosOperationItem) rather than a JSON blob:
+    variantId, quantity (Int, >0 CHECK), currency (CHAR(3)), and
+    observedUnitAmountMinor (BIGINT, >=0 CHECK).
+  - Money follows the existing convention exactly: integer minor units,
+    BigInt/BIGINT storage, no floats, no rounding or transformation, JSON
+    serialization as STRINGS (integration-verified: '1250', typeof
+    string). The DTO input form is the established PutPriceDto convention
+    (@IsInt @Min(0) @Max(Number.MAX_SAFE_INTEGER)).
+  - observedUnitAmountMinor exists ONLY for D3 PRICE_CHANGED detection
+    at sync; the device-observed price is NEVER authoritative and is
+    never repriced silently. No unresolved money rule arose: the
+    snapshot is a frozen observation in the standard representation.
+  - No speculative fields.
+
+-----------------------------------------------------------------------
+7. OPERATION STATE
+-----------------------------------------------------------------------
+  - PENDING -> (ACCEPTED | DUPLICATE | REJECTED) is the SYNC-operation
+    lifecycle only. It is NOT an Order state, NOT a Payment state, and
+    NOT an inventory state; no second Order/Payment state machine exists.
+  - U4 writes only PENDING. The terminal values and resultCode exist in
+    the enum/table for U5 to set — the durable representation U5 needs.
+
+-----------------------------------------------------------------------
+8. PULL / TOMBSTONE FOUNDATION
+-----------------------------------------------------------------------
+Deliberately NOT included: the approved D10 checkpoint structure assigns
+the pull feed (cursor/version watermark + tombstones) to P4-U5, and the
+U4 operation model has no pull-side need. No event sourcing, no broker,
+no generic event store, no speculative version column was added. (D8's
+minimal watermark/tombstone design decision belongs to the P4-U5 unit
+and was not prejudged here.)
+
+-----------------------------------------------------------------------
+9. SECURITY / RBAC / ISOLATION
+-----------------------------------------------------------------------
+RBAC: the existing keys are reused — pos:create to record, pos:read to
+read/list. No new permission. Recording grants NO authority to execute
+(the sync-time authorization is a separate server-side boundary, per
+D6/D7). Employees (pos:read only per A1) cannot record.
+
+Isolation (all integration-verified):
+  - Tenant: PosOperation/PosOperationItem are in TENANT_SCOPED_MODELS
+    (18 models). Cross-tenant record/read/device-list -> uniform 404;
+    zero mutation of the owning tenant's rows; zero rows in the caller's
+    tenant.
+  - Device: the device list is scoped to ONE authenticated device; a
+    device's outbox is never exposed through another device's listing.
+  - Session: tenant-scoped lookup, non-opener 404, uniform messages.
+  - Injection: tenantId/deviceId/storeId/cashierId/userId/status/
+    resultCode/resultOrderId/resultPaymentId/id/timestamps/unknown ->
+    whitelist 400, zero rows created.
+  - No raw SQL anywhere in the service (handwritten SQL exists only in
+    the migration for CHECKs/uniques — narrowly scoped and documented).
+
+-----------------------------------------------------------------------
+10. API SURFACE
+-----------------------------------------------------------------------
+POST /pos/offline/operations              pos:create  201/200 OperationSummary
+GET  /pos/offline/operations/:id          pos:read    200 OperationSummary
+GET  /pos/offline/devices/:deviceId/operations  pos:read  200 OperationSummary[]
+
+No sync endpoint. Recording executes NOTHING (proven: zero Order/Payment/
+Inventory rows exist after a record; an intent referencing a nonexistent
+variant records PENDING — validation is D3/D4 at sync).
+
+-----------------------------------------------------------------------
+11. CONCURRENCY TEST RESULTS (DETERMINISTIC, DB-ARBITRATED, NO SLEEPS)
+-----------------------------------------------------------------------
+  Duplicate (deviceId, clientUuid):
+    - Two CONCURRENT identical pushes -> both return the SAME row id
+      (200/201); exactly ONE durable row; ONE line set. PASS.
+    - Sequential re-push -> original row returned idempotently. PASS.
+  Sequence (deviceId, seq):
+    - Two concurrent DIFFERENT operations racing the SAME seq ->
+      exactly one 201 + one 409 ('Device sequence number already used
+      by another operation'); one durable row for the seq. PASS.
+    - Concurrent increasing seqs (101/102/103) -> all 201, unique
+      allocation. PASS.
+    - Two DIFFERENT devices using the same numeric seq -> both 201
+      (per-device scoping). PASS.
+
+-----------------------------------------------------------------------
+12. FULL REGRESSION RESULTS (ACTUAL RUNS, 2026-08-31)
+-----------------------------------------------------------------------
+  Focused P4-U4 unit suite        : 13/13 passed
+  Focused P4-U4 integration suite : 1 suite, 15/15 passed
+  Full unit suite (jest.unit.json): 49 suites, 721/721 passed
+                                   (post-P4-U3: 48/703; +1 suite, +18)
+  Full integration suite
+  (jest.integration.json)         : 25 suites, 634/634 passed
+                                   (post-P4-U3: 24/619; +1 suite, +15;
+                                   final run had ZERO failures — every
+                                   pre-existing suite green)
+  npm run lint                    : 2 errors — both the KNOWN
+                                   PRE-EXISTING asset.service.spec.ts
+                                   :203/:221; zero new issues
+  npm run build (type-check)      : success
+  npx prettier --check            : all files pass
+  npx prisma validate             : valid
+  npx prisma migrate status       : up to date (18 migrations)
+
+  TRANSPARENCY NOTE: one EARLIER full-integration run reproduced the
+  KNOWN pre-existing inventory "concurrent increments" flakiness (fails
+  only under full parallel suite load; 17/17 in isolation; pre-existing
+  since Phase 3 and untouched here). The FINAL full run passed 634/634.
+  Recorded as "reproduced then passed", NOT as fixed.
+
+-----------------------------------------------------------------------
+13. KNOWN ISSUES
+-----------------------------------------------------------------------
+PRE-EXISTING (separate from P4-U4; untouched):
+  - src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+  - Inventory concurrent-increment flakiness under parallel suite load
+    (reproduced once during this unit's gate, passed in the final run and
+    in isolation; NOT claimed fixed).
+
+P4-U4 DEFECTS: none. Test-side corrections during the gate (documented):
+RFC-4122 v4 UUID fixtures required for @IsUUID validation; typed mock
+accessors for lint type-safety; one redundant cast cleanup.
+
+-----------------------------------------------------------------------
+14. PHASE 3 + PRIOR-CHECKPOINT COMPATIBILITY
+-----------------------------------------------------------------------
+ZERO behavior changes: no Phase 3 table modified; Order/Payment/Inventory/
+Cart semantics untouched; no new RBAC keys; the existing P4-U1 (POS
+foundation), P4-U2 (online sale), and P4-U3 (multi-store inventory)
+suites all pass unchanged in the full run. Deploy-only migration
+discipline preserved; existing 17 migrations untouched.
+
+-----------------------------------------------------------------------
+15. FILES CHANGED
+-----------------------------------------------------------------------
+Created:
+  prisma/migrations/20260821150000_add_pos_offline_operations/migration.sql
+  src/pos/pos-operation.service.ts / .spec.ts
+  src/pos/pos-operation.integration.spec.ts
+  docs/phase4_p4u4_report.txt (this file)
+Modified:
+  prisma/schema.prisma (PosOperation + PosOperationItem + backrelations)
+  src/common/database/prisma/tenant-scoping.extension.ts (+2 models)
+  src/pos/dto/pos.dto.ts (+ OfflineSaleIntentItemDto,
+    RecordOfflineSaleIntentDto)
+  src/pos/dto/pos.dto.spec.ts (+5 tests)
+  src/pos/pos.controller.ts (+3 routes)
+  src/pos/pos.module.ts (+ PosOperationService)
+  docs/phase-progress.md
+
+-----------------------------------------------------------------------
+16. GIT
+-----------------------------------------------------------------------
+(Recorded after the operations succeeded.)
+
+  Commit message  : feat(pos): implement P4-U4 offline operation model
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS — working tree clean after push
+
+=======================================================================
+FINAL BOUNDARY
+=======================================================================
+  P4-U4 COMPLETE -> DOCUMENTED -> COMMITTED -> PUSHED -> HARD STOP.
+  DO NOT start P4-U5 (Sync Protocol) or any later checkpoint. Each
+  requires separate explicit approval.
+=======================================================================

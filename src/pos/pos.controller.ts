@@ -28,6 +28,7 @@ import {
   CreatePosSaleDto,
   OpenPosSessionDto,
   PosDeviceListQueryDto,
+  RecordOfflineSaleIntentDto,
   UpdatePosDeviceDto,
 } from './dto/pos.dto';
 import {
@@ -37,6 +38,10 @@ import {
 } from './pos-device.service';
 import { PosSessionService, PosSessionSummary } from './pos-session.service';
 import { PosSaleService, PosSaleSummary } from './pos-sale.service';
+import {
+  OfflineOperationSummary,
+  PosOperationService,
+} from './pos-operation.service';
 
 /**
  * POS foundation endpoints — Phase 4 P4-U1.
@@ -66,6 +71,7 @@ export class PosController {
     private readonly deviceService: PosDeviceService,
     private readonly sessionService: PosSessionService,
     private readonly saleService: PosSaleService,
+    private readonly operationService: PosOperationService,
   ) {}
 
   // ---- Devices ---------------------------------------------------------
@@ -195,5 +201,40 @@ export class PosController {
   @ApiOperation({ summary: "List a POS session's sales (shift history)" })
   listSessionSales(@Param('id') id: string): Promise<PosSaleSummary[]> {
     return this.saleService.listSessionSales(id);
+  }
+
+  // ---- Offline operations (P4-U4: the durable sync inbox) ---------------
+
+  @Post('offline/operations')
+  @RequirePermission(PERMISSIONS.POS_CREATE)
+  @ApiOperation({
+    summary:
+      'Record an offline sale intent (durable, idempotent by device+clientUuid; executes nothing)',
+  })
+  recordOfflineSaleIntent(
+    @CurrentUser() user: JwtUser,
+    @Body() dto: RecordOfflineSaleIntentDto,
+  ): Promise<OfflineOperationSummary> {
+    return this.operationService.recordOfflineSaleIntent(user.userId, dto);
+  }
+
+  @Get('offline/operations/:id')
+  @RequirePermission(PERMISSIONS.POS_READ)
+  @ApiOperation({ summary: 'Get an offline operation by id (inbox view)' })
+  getOfflineOperation(
+    @Param('id') id: string,
+  ): Promise<OfflineOperationSummary> {
+    return this.operationService.getOperation(id);
+  }
+
+  @Get('offline/devices/:deviceId/operations')
+  @RequirePermission(PERMISSIONS.POS_READ)
+  @ApiOperation({
+    summary: "List a device's offline operations ordered by its seq",
+  })
+  listDeviceOfflineOperations(
+    @Param('deviceId') deviceId: string,
+  ): Promise<OfflineOperationSummary[]> {
+    return this.operationService.listDeviceOperations(deviceId);
   }
 }

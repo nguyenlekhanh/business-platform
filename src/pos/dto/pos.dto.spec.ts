@@ -1,10 +1,11 @@
-import { plainToInstance } from 'class-transformer';
+﻿import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import {
   CreatePosDeviceDto,
   CreatePosSaleDto,
   OpenPosSessionDto,
   PosDeviceListQueryDto,
+  RecordOfflineSaleIntentDto,
   UpdatePosDeviceDto,
 } from './pos.dto';
 
@@ -253,6 +254,107 @@ describe('POS DTOs', () => {
       for (const payload of injections) {
         expect(
           (await validateLike(CreatePosSaleDto, payload)).length,
+        ).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  describe('RecordOfflineSaleIntentDto', () => {
+    const validItem = {
+      variantId: 'variant-1',
+      quantity: 2,
+      currency: 'USD',
+      observedUnitAmountMinor: 1250,
+    };
+
+    it('accepts a valid intent payload', async () => {
+      expect(
+        await validateLike(RecordOfflineSaleIntentDto, {
+          sessionId: 'session-1',
+          clientUuid: '11111111-1111-4111-8111-111111111111',
+          seq: 1,
+          items: [validItem],
+        }),
+      ).toHaveLength(0);
+    });
+
+    it('rejects a non-UUID clientUuid', async () => {
+      expect(
+        (
+          await validateLike(RecordOfflineSaleIntentDto, {
+            sessionId: 'session-1',
+            clientUuid: 'not-a-uuid',
+            seq: 1,
+            items: [validItem],
+          })
+        ).length,
+      ).toBeGreaterThan(0);
+    });
+
+    it('rejects seq <= 0 and non-integer seq', async () => {
+      for (const seq of [0, -1, 1.5, '1']) {
+        expect(
+          (
+            await validateLike(RecordOfflineSaleIntentDto, {
+              sessionId: 'session-1',
+              clientUuid: '11111111-1111-4111-8111-111111111111',
+              seq,
+              items: [validItem],
+            })
+          ).length,
+        ).toBeGreaterThan(0);
+      }
+    });
+
+    it('rejects missing/empty items and bad item fields', async () => {
+      const base = {
+        sessionId: 'session-1',
+        clientUuid: '11111111-1111-4111-8111-111111111111',
+        seq: 1,
+      };
+      const cases: Array<Record<string, unknown>> = [
+        { ...base }, // no items
+        { ...base, items: [] },
+        { ...base, items: [{ ...validItem, quantity: 0 }] },
+        { ...base, items: [{ ...validItem, quantity: 1.5 }] },
+        { ...base, items: [{ ...validItem, quantity: '2' }] },
+        { ...base, items: [{ ...validItem, currency: 'usd' }] },
+        { ...base, items: [{ ...validItem, currency: 'USDD' }] },
+        { ...base, items: [{ ...validItem, observedUnitAmountMinor: -1 }] },
+        { ...base, items: [{ ...validItem, observedUnitAmountMinor: 1.5 }] },
+        { ...base, items: [{ ...validItem, variantId: '' }] },
+      ];
+      for (const payload of cases) {
+        expect(
+          (await validateLike(RecordOfflineSaleIntentDto, payload)).length,
+        ).toBeGreaterThan(0);
+      }
+    });
+
+    it('rejects authority-field injections with 400', async () => {
+      const base = {
+        sessionId: 'session-1',
+        clientUuid: '11111111-1111-4111-8111-111111111111',
+        seq: 1,
+        items: [validItem],
+      };
+      const injections = [
+        { ...base, tenantId: 't' },
+        { ...base, deviceId: 'd' },
+        { ...base, storeId: 's' },
+        { ...base, cashierId: 'u' },
+        { ...base, userId: 'u' },
+        { ...base, status: 'ACCEPTED' },
+        { ...base, resultCode: 'PRICE_CHANGED' },
+        { ...base, resultOrderId: 'o' },
+        { ...base, resultPaymentId: 'p' },
+        { ...base, id: 'op-1' },
+        { ...base, createdAt: new Date().toISOString() },
+        { ...base, bogus: true },
+      ];
+      for (const payload of injections) {
+        expect(
+          (await validateLike(RecordOfflineSaleIntentDto, payload)).length,
         ).toBeGreaterThan(0);
       }
     });

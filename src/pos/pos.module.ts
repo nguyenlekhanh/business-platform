@@ -6,12 +6,23 @@ import { PaymentModule } from '../payment/payment.module';
 import { PosDeviceService } from './pos-device.service';
 import { PosSessionService } from './pos-session.service';
 import { PosSaleService } from './pos-sale.service';
+import { PosOperationService } from './pos-operation.service';
 import { PosController } from './pos.controller';
 
 @Module({
   imports: [TenantModule, RbacModule, OrderModule, PaymentModule],
   controllers: [PosController],
-  providers: [PosDeviceService, PosSessionService, PosSaleService],
-  exports: [PosDeviceService, PosSessionService, PosSaleService],
+  providers: [
+    PosDeviceService,
+    PosSessionService,
+    PosSaleService,
+    PosOperationService,
+  ],
+  exports: [
+    PosDeviceService,
+    PosSessionService,
+    PosSaleService,
+    PosOperationService,
+  ],
 })
 export class PosModule {}

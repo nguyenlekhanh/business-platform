@@ -424,6 +424,7 @@ model Order {
   items    OrderItem[]
   payments Payment[]
   posSale  PosSale?
+  resultOfOperations PosOperation[]
 
   @@index([tenantId])
   @@index([tenantId, createdAt, id])
@@ -481,6 +482,7 @@ model Payment {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   order  Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
   posSale PosSale?
+  resultOfOperations PosOperation[]
 
   @@index([tenantId])
   @@index([tenantId, createdAt, id])
@@ -524,6 +526,7 @@ model PosDevice {
   store    Store        @relation(fields: [storeId], references: [id], onDelete: Restrict)
   sessions PosSession[]
   sales    PosSale[]
+  operations PosOperation[]
 
   @@unique([tenantId, name])
   @@index([tenantId])
@@ -550,6 +553,7 @@ model PosSession {
   store  Store     @relation(fields: [storeId], references: [id], onDelete: Restrict)
   user   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   sales  PosSale[]
+  operations PosOperation[]
 
   @@index([tenantId])
   @@index([tenantId, createdAt, id])
@@ -594,6 +598,105 @@ model PosSale {
   @@index([userId])
 }
 
+// ---------- pos: offline operations (Phase 4 P4-U4) ----------
+// Durable, tenant-safe, device-owned ledger of OFFLINE SALE INTENTS (D1:
+// sale intents only — no voids/returns/refunds/reversals/stock-adjustments/
+// price-overrides). This is the sync INBOX that P4-U5 will process; U4
+// itself never executes anything (no Order/Payment/Inventory/Cart mutation).
+//
+// Idempotency: clientUuid is the DEVICE-GENERATED idempotency key — NEVER a
+// primary key and never trusted globally; UNIQUE(deviceId, clientUuid) is
+// the DB arbitration for duplicate pushes (at-least-once delivery,
+// exactly-once effect — the established P2002-arbitration philosophy).
+//
+// Sequence: seq is assigned by the DEVICE offline (its outbox order);
+// UNIQUE(deviceId, seq) prevents duplicate sequence allocation — two
+// different operations from one device can never claim the same seq, and
+// sequences are scoped per device (two devices may use the same number).
+//
+// Provenance is immutable and server-derived: tenant from context; device,
+// store, and cashier (the session opener) from the referenced PosSession —
+// which the operation retains even after the session closes (U5 decides
+// historical acceptability). Status describes the SYNC operation only
+// (never Order/Payment state): PENDING at record; ACCEPTED/DUPLICATE/
+// REJECTED are P4-U5's outcomes; resultCode carries the typed deterministic
+// reasons (PRICE_CHANGED, OUT_OF_STOCK, authorization rejections).
+enum PosOperationType {
+  SALE_INTENT
+}
+
+enum PosOperationStatus {
+  PENDING
+  ACCEPTED
+  DUPLICATE
+  REJECTED
+}
+
+model PosOperation {
+  id             String             @id @default(cuid())
+  tenantId       String
+  deviceId       String // derived from the session (immutable provenance)
+  sessionId      String
+  storeId        String // denormalized from the device (immutable provenance)
+  userId         String // cashier = the session opener (immutable provenance)
+  clientUuid     String // device-generated idempotency key (never a PK)
+  seq            Int // device-assigned outbox order (per-device)
+  type           PosOperationType   @default(SALE_INTENT)
+  status         PosOperationStatus @default(PENDING)
+  resultCode     String? // typed sync outcome (PRICE_CHANGED, OUT_OF_STOCK, ...)
+  resultOrderId  String? // set by P4-U5 sync when the intent executes
+  resultPaymentId String? // set by P4-U5 sync when the intent executes
+  customerId     String? // optional customer reference (validated at sync)
+  processedAt    DateTime?
+
+  createdAt DateTime @default(now()) // = when the server received the push
+  updatedAt DateTime @updatedAt
+
+  tenant        Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  device        PosDevice       @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  session       PosSession      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  store         Store           @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  resultOrder   Order?          @relation(fields: [resultOrderId], references: [id], onDelete: SetNull)
+  resultPayment Payment?        @relation(fields: [resultPaymentId], references: [id], onDelete: SetNull)
+  items         PosOperationItem[]
+
+  @@unique([deviceId, clientUuid])
+  @@unique([deviceId, seq])
+  @@index([tenantId])
+  @@index([tenantId, createdAt, id])
+  @@index([sessionId])
+  @@index([deviceId, status])
+  @@index([userId])
+}
+
+// Frozen intent snapshot lines (the device-observed catalog state). Money
+// follows the existing convention exactly: integer minor units stored as
+// BigInt, never floats, never JSON-string amounts in the database; CHECKs
+// (quantity > 0, observedUnitAmountMinor >= 0) live in handwritten SQL like
+// OrderItem's. observedUnitAmountMinor exists ONLY for D3 PRICE_CHANGED
+// detection at sync — the server stays the price authority and never
+// reprices silently.
+model PosOperationItem {
+  id          String @id @default(cuid())
+  tenantId    String
+  operationId String
+  variantId   String
+  quantity    Int
+  currency    String @db.Char(3)
+  observedUnitAmountMinor BigInt
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant    Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  operation PosOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([operationId])
+  @@index([variantId])
+}
+
 // ---------- identity ----------
 model User {
   id           String       @id @default(cuid())
@@ -608,6 +711,7 @@ model User {
   orders       Order[]
   posSessions  PosSession[]
   posSales     PosSale[]
+  posOperations PosOperation[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -660,6 +764,8 @@ model Tenant {
   posDevices  PosDevice[]
   posSessions PosSession[]
   posSales    PosSale[]
+  posOperations PosOperation[]
+  posOperationItems PosOperationItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -759,5 +865,6 @@ model Store {
   posDevices PosDevice[]
   posSessions PosSession[]
   posSales    PosSale[]
+  posOperations PosOperation[]
   inventories Inventory[]
 }

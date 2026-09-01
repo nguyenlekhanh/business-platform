@@ -3291,3 +3291,143 @@ explicit user approval.
 
 HARD STOP â€” P4-U3 complete; do not start P4-U4 without explicit approval.
 
+---
+
+## PHASE 4 P4-U4 â€” OFFLINE OPERATION MODEL COMPLETE (2026-08-31)
+
+STATUS: **P4-U4 = COMPLETE** (implemented, verified, documented). Scope
+delivered EXACTLY per the approved unit: the DURABLE, tenant-safe,
+device-owned representation of OFFLINE SALE INTENTS â€” the sync inbox that
+P4-U5 will process. NO sync protocol, NO execution (recording never creates
+Order/Payment/Inventory/Cart mutations), NO Order/Payment state machine
+changes, NO reconciliation, NO offline payment processing. P4-U5 NOT
+started; awaiting explicit user approval.
+
+DESIGN DECISIONS WITHIN APPROVED BOUNDS (no invented business rules):
+- Normalized frozen lines (PosOperationItem) instead of a JSON payload blob:
+  typed columns with exact BIGINT observed prices + handwritten CHECKs â€”
+  the OrderItem money convention; D3 PRICE_CHANGED comparison reads typed
+  data, never a free-form blob. No unresolved money rule: the observed
+  price is a frozen snapshot in the established minor-unit BigInt form;
+  the server stays the price authority AT SYNC (D3).
+- seq is DEVICE-ASSIGNED (its outbox order per approved discovery Â§4); the
+  DB UNIQUE(deviceId, seq) prevents duplicate allocation â€” NO server
+  read-then-increment and NO application memory (the instruction's race
+  trap was avoided by design). Sequences are scoped per device only.
+- Session semantics: an operation RETAINS its session identity even after
+  the session closes (integration-proven); no new session state machine; U5
+  decides historical acceptability. Cashier binding at record time = the
+  session opener (non-opener -> uniform 404, same as the online sale).
+- Tombstone/watermark (D8): deliberately NOT in U4 â€” the approved D10
+  checkpoint structure assigns the pull feed (cursor/version watermark,
+  tombstones) to P4-U5; U4's model has no pull-side need. No speculative
+  schema.
+
+MIGRATION (exactly one, additive, applied via prisma migrate deploy):
+- 20260821150000_add_pos_offline_operations
+  CREATE TYPE PosOperationType AS ENUM ('SALE_INTENT'); CREATE TYPE
+  PosOperationStatus AS ENUM ('PENDING','ACCEPTED','DUPLICATE','REJECTED');
+  CREATE TABLE PosOperation (id cuid PK, tenantId, deviceId, sessionId,
+  storeId, userId, clientUuid, seq, type, status, resultCode?, resultOrder
+  Id?, resultPaymentId?, customerId?, processedAt?, timestamps,
+  CHECK seq > 0);
+  CREATE TABLE PosOperationItem (id cuid PK, tenantId, operationId,
+  variantId, quantity, currency CHAR(3), observedUnitAmountMinor BIGINT,
+  timestamps, CHECK quantity > 0, CHECK observedUnitAmountMinor >= 0);
+  UNIQUE(deviceId, clientUuid) â€” THE idempotency arbitration;
+  UNIQUE(deviceId, seq) â€” per-device sequence ordering/arbitration;
+  indexes (tenantId), (tenantId,createdAt,id), (sessionId), (deviceId,
+  status), (userId) on the parent; (tenantId), (operationId), (variantId)
+  on lines; FKs: tenant CASCADE, device CASCADE, session CASCADE, store
+  RESTRICT, user CASCADE, resultOrder SET NULL, resultPayment SET NULL
+  (ledger rows survive link removal), item.operation CASCADE. No existing
+  objects modified. 18/18 migrations up to date.
+
+FILES CHANGED (9):
+- prisma/schema.prisma (PosOperation + PosOperationItem models + additive
+  backrelations on Tenant/User/Store/PosDevice/PosSession/Order/Payment)
+- prisma/migrations/20260821150000_add_pos_offline_operations/migration.sql
+- src/common/database/prisma/tenant-scoping.extension.ts ('PosOperation',
+  'PosOperationItem' in TENANT_SCOPED_MODELS â€” 18 models now)
+- src/pos/dto/pos.dto.ts (OfflineSaleIntentItemDto [variantId, quantity
+  1..1e6, currency ^[A-Z]{3}$, observedUnitAmountMinor @IsInt 0..
+  MAX_SAFE_INTEGER â€” the PutPriceDto convention]; RecordOfflineSaleIntent
+  Dto [sessionId, clientUuid @IsUUID, seq @IsInt @Min(1), items
+  ArrayMinSize(1), optional customerId]; whitelist rejects tenantId/
+  deviceId/storeId/sessionId-as-override/cashierId/userId/status/
+  resultCode/resultOrderId/resultPaymentId/id/timestamps/bogus)
+- src/pos/pos-operation.service.ts (recordOfflineSaleIntent: session
+  resolved tenant-scoped (uniform 404), cashier = session opener, OPEN or
+  CLOSED both recordable; single transaction writes parent + typed lines;
+  P2002 discrimination via error.meta.target: (deviceId,clientUuid) ->
+  idempotent return of the ORIGINAL row; (deviceId,seq) -> deterministic
+  409 'Device sequence number already used by another operation';
+  getOperation; listDeviceOperations ordered by the device's seq)
+- src/pos/pos.controller.ts (+ POST /pos/offline/operations [pos:create],
+  GET /pos/offline/operations/:id [pos:read], GET
+  /pos/offline/devices/:deviceId/operations [pos:read]; standard guard
+  chain + whitelist pipes; NO sync endpoint)
+- src/pos/pos.module.ts (PosOperationService wired + exported)
+- Tests: src/pos/pos-operation.service.spec.ts (13 unit), src/pos/
+  pos-operation.integration.spec.ts (15 integration), src/pos/dto/
+  pos.dto.spec.ts (+5 offline DTO tests)
+
+REQUIRED BEHAVIOR â€” ALL VERIFIED:
+- Idempotency (deviceId, clientUuid): DB UNIQUE is the authority. Two
+  CONCURRENT duplicate pushes -> exactly one durable row, same id returned
+  to both (200/201), lines never duplicated (integration-proven); a
+  sequential re-push returns the original row; a P2002 with a lost
+  original surfaces as 409 (never invents a row).
+- Sequence (deviceId, seq): two concurrent creations with DIFFERENT
+  clientUuids racing the SAME seq -> exactly one 201 + one deterministic
+  409, one durable row for that seq (DB arbitrates); concurrent increasing
+  seqs all succeed (unique allocation); two DIFFERENT devices use the same
+  numeric seq independently. No server-side read-then-increment anywhere.
+- Provenance immutable + server-derived: tenant from context; device/
+  store/cashier derived from the referenced session and frozen; the
+  operation RETAINS the session identity after close; client UUID + seq are
+  the only client-supplied identity; all authority fields whitelist-
+  rejected.
+- Recording executes NOTHING (integration-proven: zero Order/Payment/
+  Inventory rows after a record); variant/price/stock are NOT validated at
+  record time (that is D3/D4 at U5 â€” an intent referencing a nonexistent
+  variant records PENDING).
+
+SECURITY MATRIX (integration-proven): 401 on all routes; 403 outsider;
+403 employee (pos:read only â€” A1 preserved; employees cannot record);
+cross-tenant session record/read/device-list uniformly 404 with zero
+mutation; cross-DEVICE isolation via per-device list scoping; non-opener
+member 404; owner semantic-all records/reads without grants; full
+injection matrix 400 with zero rows created.
+
+VERIFICATION RESULTS (exact, actual runs, full gate after lint fixes):
+- Focused P4-U4: unit 13/13; integration 15/15.
+- Full unit suite (jest.unit.json): 49 suites, 721/721 passed
+  (was 48/703 post-P4-U3; +1 suite +18 tests exactly).
+- Full integration suite (jest.integration.json): 25 suites, 634/634
+  passed (was 24/619; +1 suite +15 tests exactly; every pre-existing suite
+  green â€” the final full run had ZERO failures; one EARLIER full-run
+  reproduced the KNOWN pre-existing inventory concurrent-increment
+  flakiness (fails under parallel load, passes 17/17 in isolation â€”
+  pre-existing since Phase 3, unrelated to P4-U4, not fixed/claimed).
+- npm run format / npx prettier --check: clean.
+- npm run lint: 2 problems â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221. Zero new lint issues (7 new
+  errors found during the gate were fixed before recording results).
+- npm run build (nest build): success.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (18 migrations). npx prisma generate: v6.19.3.
+
+PHASE 3 + P4-U1/U2/U3 COMPATIBILITY: ZERO behavior changes. No Phase 3
+table modified; Order/Payment/Inventory/Cart untouched; P4-U1/U2/U3
+suites all green in the full run. No new RBAC keys (existing pos:create/
+pos:read reused); recording grants NO authority to execute (that is a
+separate server-side validation at U5).
+
+NEXT CHECKPOINT: P4-U5 â€” Sync Protocol (batch push with per-op ack
+ACCEPTED/DUPLICATE/REJECTED + typed reasons; pull feed with cursor/
+version watermark + tombstones; retry/replay). NOT started; awaiting
+explicit user approval.
+
+HARD STOP â€” P4-U4 complete; do not start P4-U5 without explicit approval.
+
