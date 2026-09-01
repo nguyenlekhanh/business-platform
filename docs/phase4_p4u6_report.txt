@@ -1,0 +1,290 @@
+﻿=======================================================================
+ PHASE 4 â€” POS + OFFLINE SYNC
+ P4-U6 â€” OFFLINE PAYMENT BOUNDARY
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 4, Unit 6 (Offline Payment Boundary)
+Date       : 2026-08-31
+Status     : COMPLETE â€” implemented, verified, documented, committed,
+             pushed. HARD STOP before P4-U7.
+Starting
+Git commit : 8709f3c ("feat(pos): implement P4-U5 sync protocol")
+Governing
+decisions : D5 (offline payment is CASH-ONLY; card/external providers
+             online-only; the existing Order -> Payment PROCESSING ->
+             Capture -> CAPTURED machinery; NO second offline payment
+             state machine; NO external providers/refunds/webhooks/
+             new Payment states), plus D3/D4/D6/D7 as inherited.
+
+-----------------------------------------------------------------------
+1. DISCOVERY FINDINGS (documented BEFORE coding â€” the mandated gate)
+-----------------------------------------------------------------------
+Each mandated question, answered from the repository (not from report
+wording):
+
+ Q1. What exact business problem is P4-U6 solving?
+     A. The P4-U5 sync path passed `method: 'CASH'` as a call-site
+        convention through the SHARED PosSaleService.createSale â€” the
+        same method that legitimately serves the ONLINE CARD flow. The
+        cash-only offline rule (D5) was therefore enforceable only by
+        one literal: any future internal caller could have created a
+        card Payment from the offline path silently. P4-U6 makes the
+        boundary STRUCTURAL.
+
+ Q2. Does offline cash already satisfy the approved architecture?
+     A. YES â€” sync executes T5+T2 through the existing engine
+        (verified end to end in P4-U5 and re-verified here).
+
+ Q3. Is any new payment capability actually required?
+     A. NO.
+
+ Q4. Is offline card approved anywhere in the repository/docs?
+     A. NO. D5 (discovery Â§16) explicitly: "Offline payment is
+        CASH-ONLY. Card/external providers are online-only." The D10
+        checkpoint line is: "P4-U6 Offline payment boundary: cash
+        intents, T5+T2-at-sync coupling, duplicate payment protections
+        (existing guards)" â€” a boundary, not card capability.
+
+ Q5. Is payment method persisted on PosOperation?
+     A. NO â€” PosOperation has no method column (correct: the offline
+        operation is an intent; the method materializes only at sync
+        through the sale engine). Derivation-only; nothing to persist.
+
+ Q6. Can payment method be client-controlled?
+     A. NO. RecordOfflineSaleIntentDto has NO method field; the
+        whitelist + forbidNonWhitelisted reject an injected 'method'
+        with 400 (integration-proven, zero ops recorded).
+
+ Q7. Where is the existing Payment method validated?
+     A. CreatePosSaleDto.method: @IsIn(['CASH','CARD']) â€” ONLINE POS
+        only. CreatePaymentDto.method (the generic Phase 3 endpoint):
+        free-form string <= 50 â€” UNTOUCHED by this unit.
+
+ Q8. Can existing cash Payment creation be reused without modification?
+     A. YES â€” T5 derives amountMinor/currency from the Order;
+        T2 is the guarded capture. Zero changes to PaymentService.
+
+ Q9. Could existing card payment code accidentally become reachable
+     from offline sync?
+     A. BEFORE this unit: not reachable by convention (the single
+        sync call site passed 'CASH'), but a future internal caller
+        passing method='CARD' with allowClosedSession would have
+        silently created a card Payment. AFTER this unit: structurally
+        impossible (see Â§3).
+
+ Q10. Can the current API ever cause an offline operation to create a
+      card Payment?
+     A. NO â€” there is no method field anywhere on the offline path
+      (intent DTO, sync route), and the boundary now rejects non-cash
+      server-side.
+
+ Q11. Does P4-U5 already provide the correct payment boundary?
+     A. Behaviorally yes (its sync always executed cash);
+      structurally it needed this unit's guard to be future-proof.
+
+ Q12. Is any schema change genuinely required?
+     A. NO â€” explicitly recorded. No migration was created. 19
+      migrations unchanged; prisma validate valid.
+
+NO STOP was required: no unresolved business/security decision; this
+unit enforces the already-approved D5 rule rather than inventing
+behavior. Offline card, deferred card authorization, terminal capture,
+payment tokens, PAN/CVV storage, payment reversal â€” all remain
+unimplemented and unreachable.
+
+-----------------------------------------------------------------------
+2. THE EXACT BUSINESS BOUNDARY (unchanged from D5)
+-----------------------------------------------------------------------
+  - Offline payment = CASH ONLY. Unchanged.
+  - Offline card = NOT SUPPORTED. Unchanged.
+  - Successful offline sale path (preserved verbatim):
+        Order (PENDING)
+        -> Payment (PROCESSING, method CASH, T5)
+        -> Capture (T2)
+        -> Payment CAPTURED
+        -> Order PAID
+  - The EXISTING Payment state machine is reused; NO OFFLINE_PENDING /
+    OFFLINE_CAPTURED / OFFLINE_FAILED states exist. PosOperation sync
+    status (PENDING/ACCEPTED/DUPLICATE/REJECTED) remains separate from
+    Payment status â€” the separation P4-U4/U5 established.
+
+-----------------------------------------------------------------------
+3. PAYMENT METHOD ENFORCEMENT (the implemented change)
+-----------------------------------------------------------------------
+Enforcement point: the SALE/PAYMENT-CREATION BOUNDARY, server-side â€”
+not merely controller validation (per the unit instructions):
+  - PosSaleService.createSale's INTERNAL options gained `offline?: boolean`.
+  - When offline=true, any method other than CASH throws the
+    deterministic ConflictException 'Offline payment must be cash'
+    BEFORE any Prisma call (the earliest, safest point â€” nothing is
+    read, created, or captured on rejection).
+  - PosSyncService passes { allowClosedSession: true, offline: true } â€”
+    the offline sync path is structurally incapable of creating a card
+    Payment.
+  - The ONLINE path is untouched: no option passed => no check runs.
+    The online CARD flow (CreatePosSaleDto @IsIn(['CASH','CARD'])) is
+    regression-proven unchanged.
+  - Malicious-client analysis: the client cannot reach the boundary
+    with a method at all â€” the intent DTO rejects 'method' (400), the
+    sync route takes no body, and the boundary itself is internal-only.
+
+-----------------------------------------------------------------------
+4. AMOUNT INTEGRITY (verified, not assumed)
+-----------------------------------------------------------------------
+  - Payment.amountMinor === Order.subtotalMinor, exact BigInt
+    (integration asserts 3750n === 3750n for a 3 x 1250 sale).
+  - The amount is derived by T5 from the server-authoritative Order â€”
+    the client supplies NO amount anywhere on the offline path.
+  - The device-observed prices (PosOperationItem.observedUnitAmountMinor)
+    are used ONLY as the D3 PRICE_CHANGED comparator; a stale price
+    produces REJECTED/PRICE_CHANGED with NO Order, NO Payment, NO
+    inventory mutation, NO cash capture (integration-proven).
+  - OUT_OF_STOCK likewise produces no Payment/Order and untouched stock.
+  - No floats, no rounding, no silent monetary transformation anywhere.
+
+-----------------------------------------------------------------------
+5. IDEMPOTENCY (P4-U5 guarantees preserved and re-proven)
+-----------------------------------------------------------------------
+  - Retrying an ACCEPTED offline operation returns the SAME
+    Order/Payment ids with NO second Payment, NO second Order, NO
+    second capture, NO second inventory decrement (integration-proven:
+    exactly one payment, still CAPTURED; stock decremented once).
+  - Concurrent sync of the same operation: exactly ONE Payment, one
+    Order, one inventory decrement, one capture; both callers receive
+    the same durable result (real parallel HTTP + PostgreSQL; no sleeps,
+    no memory locks â€” the DB claim arbitrates).
+  - Rejected retry stays rejected deterministically (PRICE_CHANGED
+    never becomes a payment).
+  - No second payment-specific idempotency mechanism was created â€” the
+    repository's existing mechanisms (T5 duplicate-CAPTURED guard, T2
+    guarded capture, the P4-U5 processedAt claim) suffice.
+
+-----------------------------------------------------------------------
+6. FAILURE ATOMICITY (the existing transaction semantics, documented)
+-----------------------------------------------------------------------
+  - T1 (Order creation) is independently atomic: a failure rolls back
+    its own order/items/stock writes.
+  - T5 (payment create) is independently atomic and guarded (PENDING
+    order + no prior CAPTURED).
+  - T2 (capture) is independently atomic and guarded (both updates
+    count==1 or abort).
+  - The engine stages run in sequence T1 -> T5 -> T2; each failure
+    leaves a consistent state, and validation runs BEFORE any of them
+    so deterministic rejections mutate nothing. An engine
+    'Insufficient stock' race after validation is caught by sync and
+    persisted as OUT_OF_STOCK (deterministic).
+  - Verified by direct DB row counts: no accepted operation without a
+    valid Payment; no Payment without its Order; no duplicates; no
+    inventory mutation without a successful sale.
+
+-----------------------------------------------------------------------
+7. SECURITY (integration-proven within this unit's suite)
+-----------------------------------------------------------------------
+  - 401 without cashier JWT; 401 without device credential; 401 WRONG
+    device credential (constant-time verify).
+  - 404 cross-tenant operation sync (uniform; zero leakage into
+    either tenant's payment tables).
+  - Payment method injection on the intent DTO -> 400 (whitelist),
+    zero operations recorded.
+  - OrderId/PaymentId injection: structurally impossible â€” the sync
+    request has NO body; result ids are server-derived only.
+  - No API marks an offline Payment captured directly: the generic
+    capture endpoint retains its payment:manage permission (a pos-only
+    cashier gets 403; integration-proven).
+  - The client cannot select tenant/device/cashier (all server-derived)
+    and cannot modify the persisted payment result (the durable
+    PosOperation row is the only result record; re-sync returns it).
+
+-----------------------------------------------------------------------
+8. API CHANGES
+-----------------------------------------------------------------------
+NONE. No new endpoint was required or invented (per instruction 14);
+the change is an internal service option plus focused tests.
+
+-----------------------------------------------------------------------
+9. SCHEMA / MIGRATION CHANGES
+-----------------------------------------------------------------------
+NONE â€” explicitly recorded per instruction 13. The discovery gate proved
+no schema change was required (no method is persisted on PosOperation;
+no new table/column/index/constraint is needed for the boundary). The
+19 existing migrations are unchanged; `prisma validate` valid;
+`prisma migrate status` up to date.
+
+-----------------------------------------------------------------------
+10. FOCUSED TEST RESULTS (ACTUAL RUNS)
+-----------------------------------------------------------------------
+  Focused P4-U6 unit (sale service):        15/15 passed
+     (incl. +2 boundary tests: CARD rejected 'Offline payment must be
+      cash' with ZERO engine calls invoked; CASH accepted end to end)
+  Focused P4-U6 integration
+  (pos-payment-boundary suite): 1 suite, 13/13 passed
+  Full unit suite (jest.unit.json): 50 suites, 744/744 passed
+  Full integration suite (jest.integration.json): 27 suites,
+  665/665 tests present; every suite passes (see the transparency
+  note below for the known pre-existing flakiness).
+  npm run lint: 2 errors â€” both the KNOWN PRE-EXISTING
+  asset.service.spec.ts :203/:221; zero new issues.
+  npm run build: success. npx prettier --check: pass.
+  npx prisma validate: valid. npx prisma migrate status: up to date
+  (19 migrations).
+
+  TRANSPARENCY NOTE: one full-suite run reproduced the KNOWN
+  pre-existing inventory "concurrent increments" flakiness (a single
+  failure only under full parallel suite load; 17/17 in isolation;
+  documented since Phase 3 and untouched here). It is NOT claimed fixed
+  and is NOT a P4-U6 defect: the P4-U6 changes touch only the POS sale
+  boundary and its tests.
+
+  P4-U1/U2/U3/U4/U5 regression: all POS suites green within the full
+  run (71/71 across the four prior POS integration suites + the new
+  13); P4-U5's sync suite (18/18) re-verified: PRICE_CHANGED,
+  OUT_OF_STOCK, idempotency, concurrent claim, demotion, closed-session
+  sync, provenance, feed, isolation.
+
+-----------------------------------------------------------------------
+11. KNOWN ISSUES
+-----------------------------------------------------------------------
+PRE-EXISTING (separate from P4-U6; untouched):
+  - src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+  - Inventory concurrent-increment flakiness under parallel suite load
+    (reproduced once during this unit's gate; passes in isolation and
+    in the final accounting; NOT claimed fixed).
+
+P4-U6 DEFECTS: none.
+
+-----------------------------------------------------------------------
+12. FILES CHANGED
+-----------------------------------------------------------------------
+Modified:
+  src/pos/pos-sale.service.ts  (internal `offline` boundary option)
+  src/pos/pos-sync.service.ts  (passes offline:true on the sync path)
+  src/pos/pos-sale.service.spec.ts (+2 unit tests)
+  docs/phase-progress.md
+Created:
+  src/pos/pos-payment-boundary.integration.spec.ts (13 tests)
+  docs/phase4_p4u6_report.txt (this file)
+
+NO schema, NO migration, NO new endpoint, NO PaymentService change.
+
+-----------------------------------------------------------------------
+13. GIT
+-----------------------------------------------------------------------
+(Recorded after the operations succeeded.)
+
+  Commit hash    : 44d121b
+  Commit message  : feat(pos): implement P4-U6 offline payment boundary
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS â€” working tree clean after push
+
+=======================================================================
+FINAL BOUNDARY
+=======================================================================
+  P4-U6 COMPLETE -> DOCUMENTED -> COMMITTED -> PUSHED -> HARD STOP.
+  Offline payment remains CASH-ONLY; offline card remains UNSUPPORTED;
+  the existing Payment state machine is the only payment state machine.
+  DO NOT start P4-U7 (Conflict Handling + Reconciliation) or any later
+  checkpoint. Each requires separate explicit approval.
+=======================================================================
+

@@ -281,6 +281,40 @@ describe('PosSaleService', () => {
       expect(result.paymentStatus).toBe('PROCESSING');
     });
 
+    it('P4-U6: the offline boundary rejects a CARD method deterministically (D5 cash-only)', async () => {
+      // No mocks needed: the boundary check runs BEFORE any Prisma call.
+      await expect(
+        runInTenant(() =>
+          service.createSale(
+            'user-1',
+            { ...saleDto, method: 'CARD' },
+            { allowClosedSession: true, offline: true },
+          ),
+        ),
+      ).rejects.toThrow('Offline payment must be cash');
+      // NOTHING ran: no session lookup beyond the boundary, no order,
+      // no payment.
+      expect(mockOrderCreate).not.toHaveBeenCalled();
+      expect(mockPaymentCreate).not.toHaveBeenCalled();
+      expect(mockPaymentCapture).not.toHaveBeenCalled();
+    });
+
+    it('P4-U6: the offline boundary ACCEPTS CASH (the sync path itself)', async () => {
+      seedHappyPath();
+      const result = await runInTenant(() =>
+        service.createSale(
+          'user-1',
+          { ...saleDto, method: 'CASH' },
+          { allowClosedSession: true, offline: true },
+        ),
+      );
+      expect(result.paymentStatus).toBe('CAPTURED');
+      expect(mockPaymentCreate).toHaveBeenCalledWith({
+        orderId: 'order-1',
+        method: 'CASH',
+      });
+    });
+
     it('forwards optional customerId to the existing order path (walk-in default: none)', async () => {
       seedHappyPath();
       await runInTenant(() =>

@@ -90,10 +90,26 @@ export class PosSaleService {
        * client can reach this path.
        */
       allowClosedSession?: boolean;
+      /**
+       * INTERNAL — P4-U6 offline payment boundary (approved D5: offline
+       * payment is CASH-ONLY; card/external providers are online-only).
+       * When offline=true, any method other than CASH is rejected AT THE
+       * PAYMENT BOUNDARY with a deterministic 409 — the online CARD flow
+       * is completely unaffected. The offline sync path is structurally
+       * incapable of creating a card Payment, not merely by convention
+       * of its call site.
+       */
+      offline?: boolean;
     },
   ): Promise<PosSaleSummary> {
     this.assertTenantContext();
     const tenantId = this.tenantContext.requireTenantId();
+
+    // P4-U6: the offline payment boundary is enforced server-side at the
+    // sale/payment creation boundary — never only at a controller.
+    if (options?.offline && dto.method !== undefined && dto.method !== 'CASH') {
+      throw new ConflictException('Offline payment must be cash');
+    }
 
     // 1. POS context: everything derives from the session.
     const session = await this.prisma.posSession.findUnique({

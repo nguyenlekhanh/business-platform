@@ -159,7 +159,9 @@ export class PosSyncService {
           ...(operation.customerId ? { customerId: operation.customerId } : {}),
           method: 'CASH',
         },
-        { allowClosedSession: true },
+        // D5 via the P4-U6 boundary: the sync path is structurally
+        // cash-only at the payment-creation boundary.
+        { allowClosedSession: true, offline: true },
       );
 
       const finalized = await this.prisma.posOperation.updateMany({
