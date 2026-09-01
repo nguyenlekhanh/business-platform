@@ -272,11 +272,16 @@ NO schema, NO migration, NO new endpoint, NO PaymentService change.
 -----------------------------------------------------------------------
 (Recorded after the operations succeeded.)
 
-  Commit hash    : 44d121b
+  Commit hash    : 071a431 (final; the original commit 44d121b was
+                    amended once to stamp the hash into this report
+                    before pushing — the same transparent pattern as
+                    the Phase 3 CP7/CP8 reports)
   Commit message  : feat(pos): implement P4-U6 offline payment boundary
   Branch          : main
   Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
-  Push result     : SUCCESS â€” working tree clean after push
+  Push result     : SUCCESS - 8709f3c..071a431 main -> main; verified
+                    on the remote via git fetch (origin/main HEAD =
+                    071a431); working tree clean after push.
 
 =======================================================================
 FINAL BOUNDARY
