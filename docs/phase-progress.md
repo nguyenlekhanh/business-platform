@@ -3431,3 +3431,151 @@ explicit user approval.
 
 HARD STOP â€” P4-U4 complete; do not start P4-U5 without explicit approval.
 
+---
+
+## PHASE 4 P4-U5 â€” SYNC PROTOCOL COMPLETE (2026-08-31)
+
+STATUS: **P4-U5 = COMPLETE** (implemented, verified, documented). Scope
+delivered EXACTLY per the approved unit: the SERVER-SIDE sync protocol for
+the durable offline sale intents established by P4-U4 â€” push (sync one
+operation: D6 dual authentication, D7 authorization revalidation, D3/D4
+deterministic validation, execution through the EXISTING sale engine, durable
+typed results, exactly-once concurrency) and pull (D8 minimal watermark +
+tombstone feed). NO offline card, refunds, voids, returns, stock adjustments,
+price overrides, negative stock, partial fulfillment, event sourcing, brokers,
+or new Order/Payment/Inventory state machines. P4-U6 NOT started; awaiting
+explicit user approval.
+
+DISCOVERY GATE (documented BEFORE coding; all resolved from the repository):
+- Sale execution entry: PosSaleService.createSale (P4-U2) â€” T1 Order ->
+  T5 Payment -> T2 cash capture -> PosSale provenance.
+- Order boundary: interactive $transaction; guarded decrement (gte) is the
+  race authority; P4-U3 store-pool via inventoryScope.
+- Cash: T5 + immediate T2 ('cash captured when tendered', D5 identical).
+- Sync RBAC: existing pos:create; PermissionService.assertPermissions
+  reusable directly for D7.
+- Device auth: PosDeviceService.verifyCredential (constant-time) â€” built in
+  P4-U1 for exactly this consumer (A2).
+- CRITICAL FINDING (empirically verified, script deleted after use): Prisma
+  6.19.3 interactive transactions DO NOT NEST (the inner tx client omits
+  $transaction), so the sale engine's internal transactions cannot be
+  wrapped in an outer claim transaction. This shaped the concurrency design
+  (below) â€” resolved WITHOUT redesigning U4 or duplicating sale logic.
+
+CONCURRENCY DESIGN (the discovery finding resolved within approved bounds):
+- Claim = a guarded updateMany on an EXISTING P4-U4 column â€” processedAt
+  (null = unclaimed): updateMany({id, status:'PENDING', processedAt: null},
+  {processedAt: now}). The DB arbitrates: exactly one concurrent syncer wins
+  (count 1); losers NEVER execute the sale and instead bounded-await the
+  winner's durable result (awaiting an in-flight transaction â€” standard
+  practice, not a correctness sleep) and return the SAME result.
+- Stale-claim crash recovery: a claim older than 5 minutes with no result is
+  clearable (the engine is independently atomic, so no partial sale can
+  exist); deterministic and documented.
+- NO new schema for the claim; NO P4-U4 model redesign.
+
+MIGRATION (exactly one, additive, applied via prisma migrate deploy):
+- 20260821160000_add_pos_feed_events (the D8 pull feed ONLY):
+  CREATE TYPE PosFeedKind AS ENUM ('PRODUCT','PRODUCT_VARIANT','PRICE',
+  'DELETED'); CREATE TABLE PosFeedEvent (id cuid PK, tenantId, feedSeq Int
+  (CHECK > 0), kind, entityId, createdAt); UNIQUE(tenantId, feedSeq) â€” the
+  watermark authority; indexes (tenantId), (tenantId, feedSeq); FK tenant
+  CASCADE. What it versions: POS-relevant catalog entities. Who increments:
+  the server, in the mutation's transaction (the row IS the bump). Watermark
+  meaning: feedSeq = per-tenant monotonic version; device cursor = last
+  consumed feedSeq. Consumption: GET /pos/feed?since=<cursor> -> ordered
+  entries + nextCursor (highest delivered, or since when empty â€” half-open
+  interval = deterministic resume, no missed changes, no duplicates).
+  Deletion: kind='DELETED' tombstone rows (entity kind + id). Tenant
+  isolation: PosFeedEvent in TENANT_SCOPED_MODELS. NO event
+  sourcing/broker/event store. 19/19 migrations up to date.
+
+FILES CHANGED (9):
+- prisma/schema.prisma (PosFeedEvent model + Tenant.posFeedEvents backrel)
+- prisma/migrations/20260821160000_add_pos_feed_events/migration.sql
+- src/common/database/prisma/tenant-scoping.extension.ts ('PosFeedEvent' in
+  TENANT_SCOPED_MODELS â€” 19 models)
+- src/pos/pos-sale.service.ts (ONE additive internal option
+  allowClosedSession on createSale â€” the minimal reuse point: the online
+  endpoint still requires OPEN; sync sets it ONLY after its own full
+  D6/D7 revalidation. No HTTP client can reach it. No other behavior change.)
+- src/pos/pos-sync.service.ts (NEW: syncOperation â€” load op (uniform 404);
+  assertSyncAuthority (D6: credential required + constant-time verify vs the
+  op's OWN device + device ACTIVE; D7: principal == recorded cashier +
+  CURRENT pos:create via PermissionService); deterministic validateIntent
+  (D3: exact BigInt price comparison vs the frozen observed snapshot, uniform
+  currency rule; D4: all-or-nothing store-pool stock) BEFORE any mutation;
+  claim (processedAt guard); execution via createSale(CASH,
+  allowClosedSession); atomic final updateMany PENDING->ACCEPTED + ids;
+  engine 'Insufficient stock' race after validation -> persisted
+  OUT_OF_STOCK; persistRejection (PENDING->REJECTED + typed resultCode,
+  immutable); durable replays return the persisted result verbatim;
+  awaitConcurrentResult bounded poll + stale-claim recovery. pullFeed:
+  since-cursor -> entries + nextCursor.)
+- src/pos/pos.controller.ts (+ POST /pos/offline/operations/:id/sync
+  [pos:create; X-POS-Device-Credential header; @HttpCode 200];
+  GET /pos/feed?since= [pos:read])
+- src/pos/pos.module.ts (PosSyncService wired + exported)
+- Tests: src/pos/pos-sync.service.spec.ts (21 unit),
+  src/pos/pos-sync.integration.spec.ts (18 integration)
+
+DETERMINISTIC RESULT CODES (typed, no free-form blobs): PRICE_CHANGED,
+OUT_OF_STOCK, CURRENCY_MIX, PRICE_NOT_FOUND, VARIANT_NOT_FOUND,
+VARIANT_NOT_ACTIVE, EMPTY_INTENT â€” all persisted on PosOperation.status=
+REJECTED + resultCode; ACCEPTED persists resultOrderId/resultPaymentId.
+
+KEY TEST COVERAGE (integration, real AppModule + real PostgreSQL):
+- Push authn/authz: 401 no-JWT; 401 no-credential; 401 WRONG credential
+  (constant-time fail); 401 credential of a DIFFERENT device (mismatch);
+  409 SUSPENDED device at sync (revocation); 404 non-opener caller
+  (ownership); D7 DEMOTION -> 403 + op left PENDING + zero execution;
+  outsider 403; cross-tenant adminB uniform 404 with state untouched.
+- D3: PRICE_CHANGED persisted + immutable on retry + zero orders/payments +
+  stock untouched; never silently repriced (sale never called).
+- D4: OUT_OF_STOCK all-or-nothing (no partial state; stock untouched);
+  VARIANT_NOT_FOUND for a nonexistent-variant intent; CURRENCY_MIX for
+  mixed-currency intents (existing uniform rule).
+- Execution: ACCEPTED -> Order PAID (subtotal 3750n exact server price),
+  Payment CAPTURED method CASH amount 3750n (D5), store stock 10->7,
+  PosSale provenance (session/store), op row ACCEPTED + ids + processedAt.
+  Retry-after-ACCEPTED: same durable ids, exactly one order/payment, stock
+  decremented ONCE. CLOSED historical session syncs (provenance retained,
+  authority revalidated). Two ops same device independent; second device its
+  own op/pool.
+- CONCURRENT SYNC (mandatory race): two parallel POSTs on one operation ->
+  both callers the SAME ACCEPTED result (same orderId/paymentId), exactly
+  one Order, one Payment, stock 10->6 (never ->2). DB-arbitrated claim; no
+  sleeps-for-correctness.
+- Pull feed: ordered entries above cursor; empty page echoes since
+  (deterministic resume); tombstone delivered; new event above cursor;
+  tenant isolation (tenant B rows never leak into A's feed and vice versa);
+  pos:read pulls; invalid cursor rejected.
+
+VERIFICATION RESULTS (exact, actual runs, full gate re-run after lint fixes):
+- Focused P4-U5: unit 21/21; integration 18/18.
+- Full unit suite (jest.unit.json): 50 suites, 742/742 passed
+  (was 49/721 post-P4-U4; +1 suite +21 tests exactly).
+- Full integration suite (jest.integration.json): 26 suites, 652/652 passed
+  (was 25/634; +1 suite +18 tests exactly; every pre-existing suite green â€”
+  P4-U1/U2/U3/U4 all pass unchanged; the known inventory parallel-load
+  flakiness did NOT reproduce in the final run).
+- npm run format / npx prettier --check: clean.
+- npm run lint: 2 problems â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221. Zero new lint issues (5 new
+  errors found during the gate were fixed before recording results).
+- npm run build (nest build): success.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (19 migrations). npx prisma generate: v6.19.3.
+
+PHASE 3 + P4-U1..U4 COMPATIBILITY: ZERO behavior changes. No Phase 3 table
+touched; Order/Payment/Inventory/Cart semantics unchanged; createSale gained
+only an internal default-off option; existing 18 migrations untouched;
+no new RBAC keys (pos:create/pos:read reused); recording still grants NO
+execution authority (sync is a separate server-side boundary).
+
+NEXT CHECKPOINT: P4-U6 â€” Offline Payment Boundary (cash intents at sync,
+duplicate payment protections). NOT started; awaiting explicit user
+approval.
+
+HARD STOP â€” P4-U5 complete; do not start P4-U6 without explicit approval.
+

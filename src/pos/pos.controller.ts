@@ -2,9 +2,11 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
+  ParseIntPipe,
   Patch,
   Post,
   Query,
@@ -42,6 +44,7 @@ import {
   OfflineOperationSummary,
   PosOperationService,
 } from './pos-operation.service';
+import { FeedPage, PosSyncService, SyncResult } from './pos-sync.service';
 
 /**
  * POS foundation endpoints — Phase 4 P4-U1.
@@ -72,6 +75,7 @@ export class PosController {
     private readonly sessionService: PosSessionService,
     private readonly saleService: PosSaleService,
     private readonly operationService: PosOperationService,
+    private readonly syncService: PosSyncService,
   ) {}
 
   // ---- Devices ---------------------------------------------------------
@@ -236,5 +240,47 @@ export class PosController {
     @Param('deviceId') deviceId: string,
   ): Promise<OfflineOperationSummary[]> {
     return this.operationService.listDeviceOperations(deviceId);
+  }
+
+  // ---- Sync (P4-U5: push execution + D8 pull feed) ----------------------
+
+  /**
+   * Sync one offline operation (push). Requires BOTH the cashier JWT
+   * (guard chain) and the server-issued device credential in the
+   * X-POS-Device-Credential header (D6) — verified against the
+   * operation's OWN device, constant-time. Authorization is revalidated
+   * at sync (D7): the principal must be the recorded cashier holding
+   * CURRENT pos:create. The route permission is pos:create; the device
+   * credential + ownership checks run in the service.
+   */
+  @Post('offline/operations/:id/sync')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission(PERMISSIONS.POS_CREATE)
+  @ApiOperation({
+    summary:
+      'Sync an offline operation: revalidate authority, execute via the existing sale engine, persist the durable result',
+  })
+  syncOfflineOperation(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Headers('X-POS-Device-Credential') deviceCredential?: string,
+  ): Promise<SyncResult> {
+    return this.syncService.syncOperation(user.userId, id, deviceCredential);
+  }
+
+  /**
+   * Pull feed (D8): ordered watermark+tombstone entries above the device
+   * cursor. `since` is the last delivered feedSeq (0 = from the start).
+   */
+  @Get('feed')
+  @RequirePermission(PERMISSIONS.POS_READ)
+  @ApiOperation({
+    summary:
+      'Pull catalog change feed (version watermark + tombstones) above the cursor',
+  })
+  pullFeed(
+    @Query('since', new ParseIntPipe({ optional: true })) since = 0,
+  ): Promise<FeedPage> {
+    return this.syncService.pullFeed(since);
   }
 }

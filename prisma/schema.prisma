@@ -697,6 +697,46 @@ model PosOperationItem {
   @@index([variantId])
 }
 
+// ---------- pos: sync pull feed (Phase 4 P4-U5, D8) ----------
+// MINIMAL watermark + tombstone change feed. NOT event sourcing: a flat,
+// per-tenant, monotonically versioned log of catalog mutations that POS
+// devices pull to refresh their local cache. No broker, no event store, no
+// replay-to-state machinery — each row is just "entity K changed / was
+// deleted at version V".
+//
+// What it versions: the POS-relevant catalog entities (PRODUCT,
+// PRODUCT_VARIANT, PRICE) — what a device caches to sell offline.
+// Who increments: the server, at each catalog mutation, within the same
+// transaction (the feed row IS the watermark bump).
+// What the watermark means: feedSeq is the global-per-tenant monotonic
+// version; a device's cursor is the last feedSeq it has consumed.
+// How a client consumes it: GET /pos/feed?since=<cursor> returns ordered
+// rows above the cursor plus the next cursor; no rows => nothing changed.
+// Deletion representation: kind = 'DELETED' tombstone rows carry the
+// entity kind + id; the device removes the local row. Tenant isolation:
+// the table is tenant-scoped (TENANT_SCOPED_MODELS) and every read is
+// force-scoped to the caller's tenant; cursors embed no tenant data.
+enum PosFeedKind {
+  PRODUCT
+  PRODUCT_VARIANT
+  PRICE
+  DELETED
+}
+
+model PosFeedEvent {
+  id        String      @id @default(cuid())
+  tenantId  String
+  feedSeq   Int         @unique // the per-tenant monotonic watermark
+  kind      PosFeedKind
+  entityId  String // catalog entity id (or the deleted id for tombstones)
+  createdAt DateTime    @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, feedSeq])
+}
+
 // ---------- identity ----------
 model User {
   id           String       @id @default(cuid())
@@ -766,6 +806,7 @@ model Tenant {
   posSales    PosSale[]
   posOperations PosOperation[]
   posOperationItems PosOperationItem[]
+  posFeedEvents     PosFeedEvent[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

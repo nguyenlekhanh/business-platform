@@ -78,16 +78,29 @@ export class PosSaleService {
   async createSale(
     userId: string,
     dto: CreatePosSaleDto,
+    options?: {
+      /**
+       * INTERNAL — P4-U5 sync consumer only. The online endpoint requires
+       * an OPEN session; the sync protocol executes intents recorded
+       * during a shift that has since CLOSED (D7: authorization is
+       * revalidated at sync; provenance is not execution authority).
+       * Sync sets allowClosedSession=true ONLY after its own full
+       * revalidation (tenant, device ACTIVE, device-credential,
+       * cashier = recorded opener, current RBAC pos:create). No HTTP
+       * client can reach this path.
+       */
+      allowClosedSession?: boolean;
+    },
   ): Promise<PosSaleSummary> {
     this.assertTenantContext();
     const tenantId = this.tenantContext.requireTenantId();
 
-    // 1. POS context: everything derives from the OPEN session.
+    // 1. POS context: everything derives from the session.
     const session = await this.prisma.posSession.findUnique({
       where: { id: dto.sessionId },
     });
     if (!session) throw new NotFoundException(SESSION_NOT_FOUND);
-    if (session.status !== 'OPEN') {
+    if (session.status !== 'OPEN' && !options?.allowClosedSession) {
       throw new ConflictException(SESSION_NOT_OPEN);
     }
     const device = await this.prisma.posDevice.findUnique({

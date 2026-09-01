@@ -1,0 +1,344 @@
+=======================================================================
+ PHASE 4 — POS + OFFLINE SYNC
+ P4-U5 — SYNC PROTOCOL
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 4, Unit 5 (Offline Sync Protocol)
+Date       : 2026-08-31
+Status     : COMPLETE — implemented, verified, documented, committed,
+             pushed. HARD STOP before P4-U6.
+Starting
+Git commit : 0d238a9 ("feat(pos): implement P4-U4 offline operation model")
+Governing
+decisions : D1–D8 (frozen; docs/phase4_discovery_report.txt §16).
+
+-----------------------------------------------------------------------
+1. SCOPE
+-----------------------------------------------------------------------
+The server-side synchronization protocol for the durable offline sale
+intents established by P4-U4:
+  PUSH — sync one operation: dual authentication (D6), sync-time
+         authorization revalidation (D7), deterministic price/stock
+         validation (D3/D4), execution through the EXISTING sale engine,
+         durable typed results, exactly-once concurrency.
+  PULL  — the D8 minimal version-watermark + tombstone feed.
+
+Explicitly NOT implemented: offline card payments, refunds, voids,
+returns, stock adjustments, price overrides, negative stock, partial
+fulfillment, event sourcing, Kafka/brokers, generic event stores, new
+Order/Payment/Inventory state machines, reconciliation beyond the
+approved sync result semantics.
+
+-----------------------------------------------------------------------
+2. DISCOVERY FINDINGS (documented BEFORE coding)
+-----------------------------------------------------------------------
+  - Sale execution entry point : PosSaleService.createSale (P4-U2) —
+    OrderService.createOrder (T1) -> PaymentService.createPayment (T5)
+    -> capturePayment (T2, cash) -> PosSale provenance.
+  - Order transaction boundary : interactive $transaction; the guarded
+    quantityOnHand gte decrement is the concurrency authority.
+  - Inventory semantics        : P4-U3 store pools via inventoryScope;
+    decrement-on-order, restock-on-cancel exactly once.
+  - Cash payment semantics     : T5 + immediate T2 ("cash is captured
+    when tendered"); Payment.amountMinor/currency derived from the
+    Order (server-authoritative).
+  - Sync RBAC                  : existing pos:create; the existing
+    PermissionService.assertPermissions is reusable directly for D7.
+  - Device authentication      : PosDeviceService.verifyCredential —
+    constant-time, built in P4-U1 (A2) for exactly this consumer.
+  - Cashier JWT                : the existing guard chain.
+  - Tenant/store/session       : server-derived; the operation carries
+    frozen session/device/store/cashier provenance (P4-U4).
+  - Idempotency mechanisms     : P4-U4 UNIQUE(deviceId, clientUuid)
+    (push dedup at record time) + the guarded processedAt claim (sync
+    execution gate) + the guarded status transitions (result writes).
+  - Price source               : Price rows (per variant+currency);
+    money is exact BigInt minor units.
+  - Stock source               : the per-store Inventory pool row.
+  - Reuse verdict               : createSale is reusable directly;
+    the ONLY gap was the OPEN-session requirement vs a historical
+    (CLOSED) shift — closed with ONE additive internal option
+    (allowClosedSession), set ONLY by sync after its own full
+    revalidation. No HTTP client can reach it. Zero logic duplicated.
+  - Concurrent sync prevention  : REQUIRED (two racers must not execute
+    twice). Solved with a DB-arbitrated claim on an EXISTING U4 column
+    (see §6) — no model redesign.
+  - Watermark/tombstone minimal : PosFeedEvent (§9).
+
+  CRITICAL FINDING (empirically verified with a one-shot script,
+  deleted before commit): Prisma 6.19.3 interactive transactions DO
+  NOT NEST — the inner transaction client omits $transaction — so the
+  sale engine's internal transactions cannot be wrapped in an outer
+  claim transaction. This architectural fact shaped the concurrency
+  design; it was resolved WITHOUT redesigning P4-U4 and WITHOUT
+  duplicating sale logic.
+
+-----------------------------------------------------------------------
+3. API
+-----------------------------------------------------------------------
+POST /pos/offline/operations/:id/sync     pos:create   200 SyncResult
+  Headers: Authorization (cashier JWT) + X-POS-Device-Credential
+           (the server-issued device secret, D6).
+  Body: none. The operation is resolved by durable id through the
+  authenticated tenant context (uniform 404 for foreign ids); every
+  authority field (tenant/device/store/session/cashier) is
+  server-derived — a client cannot override any of them (none are even
+  accepted in the request).
+GET  /pos/feed?since=<int>                pos:read     200 FeedPage
+  since = the device cursor (last consumed feedSeq; 0 = from start).
+
+-----------------------------------------------------------------------
+4. AUTHENTICATION + AUTHORIZATION (D6 + D7)
+-----------------------------------------------------------------------
+D6 (both factors, every sync):
+  - Cashier JWT via the standard guard chain (401 without it).
+  - Device credential via X-POS-Device-Credential: REQUIRED (401
+    missing), verified CONSTANT-TIME (timingSafeEqual over sha256
+    digests) against the operation's OWN device (a credential from a
+    different device => 401 mismatch), and the device must be ACTIVE
+    (SUSPENDED/RETIRED => 409 'Device is not active' — revocation at
+    sync time). Tenant identity is always server-derived.
+
+D7 (authorization revalidated at sync, never inherited from creation):
+  - The authenticated principal MUST be the operation's recorded
+    cashier (ownership violation => uniform 404 'POS operation not
+    found' — no existence oracle).
+  - The cashier must hold CURRENT pos:create in the tenant (via the
+    existing PermissionService; demotion after recording => 403
+    'Insufficient permissions' with the operation left PENDING and
+    ZERO execution — integration-proven).
+  - Recording an operation granted NO authority to execute.
+
+-----------------------------------------------------------------------
+5. OPERATION STATE TRANSITIONS + IDEMPOTENCY
+-----------------------------------------------------------------------
+The P4-U4 sync state model is used verbatim (no second state machine):
+  PENDING -> ACCEPTED   (execution succeeded; resultOrderId/
+                          resultPaymentId persisted atomically)
+  PENDING -> REJECTED    (deterministic typed resultCode; immutable)
+  PENDING (stays)       on authorization failure (403/404/401 — the
+                        caller must re-authenticate/re-sync properly)
+
+Idempotency:
+  - A retried ACCEPTED operation returns the durable previous result
+    (same order/payment ids) with NO re-execution — integration-proven
+    (exactly one order/payment; stock decremented once).
+  - A retried REJECTED operation returns the persisted rejection
+    UNCHANGED (e.g. PRICE_CHANGED stays PRICE_CHANGED) — a business
+    rejection is never silently retried into a different outcome.
+  - Concurrency (below) guarantees a single execution even for
+    simultaneous first-sync attempts.
+
+-----------------------------------------------------------------------
+6. CONCURRENCY STRATEGY (exactly-once execution)
+-----------------------------------------------------------------------
+Constraint discovered: Prisma interactive transactions do not nest, so
+the claim could not wrap the engine in one transaction. Solution — a
+DB-arbitrated claim on an EXISTING P4-U4 column (processedAt,
+null = unclaimed):
+    updateMany({ id, status: 'PENDING', processedAt: null },
+               { processedAt: now })
+  - Exactly one concurrent syncer wins (count 1) and executes.
+  - Losers NEVER execute the sale; they bounded-await the winner's
+    durable result (awaiting an in-flight transaction — standard
+    practice, NOT a correctness sleep; capped at 200 x 25ms) and both
+    callers return the SAME durable result.
+  - Stale-claim crash recovery: a claim older than 5 minutes with no
+    result is clearable (the engine is independently atomic — a crash
+    cannot leave a partial sale); deterministic and documented.
+  - The final result write is a guarded updateMany (status PENDING ->
+    ACCEPTED with ids / -> REJECTED with code), so result persistence
+    is single-writer too.
+  - The stock decrement remains inside T1's guarded updateMany (the
+    existing authority) — an engine 'Insufficient stock' race that
+    occurs AFTER pre-validation is caught and persisted as
+    OUT_OF_STOCK (deterministic, no partial state).
+
+-----------------------------------------------------------------------
+7. PRICE VALIDATION (D3)
+-----------------------------------------------------------------------
+For every PosOperationItem, in the intent's currency:
+  - load the CURRENT server-authoritative Price;
+  - compare EXACTLY against the device-observed snapshot persisted by
+    P4-U4 using BigInt equality (no floats, no rounding, no
+    transformation);
+  - any difference => deterministic REJECTED PRICE_CHANGED — never
+    silent repricing, and the sale engine is never invoked.
+Currency rule (existing repository rule, reused): a uniform single
+currency per order; a mixed-currency intent => CURRENCY_MIX. A missing
+price row for the intent's currency => PRICE_NOT_FOUND.
+
+-----------------------------------------------------------------------
+8. STOCK VALIDATION (D4)
+-----------------------------------------------------------------------
+All-or-nothing against the operation's STORE pool (the same pool T1
+decrements): the aggregated quantity per variant must be covered by
+the current pool row; otherwise deterministic REJECTED OUT_OF_STOCK
+with NO Order/Payment/Inventory mutation remaining (integration
+verifies zero rows and untouched stock). No negative stock (the DB
+CHECK + the T1 guarded decrement remain the authorities), no partial
+fulfillment, no quantity reduction, no second reservation model.
+
+-----------------------------------------------------------------------
+9. PULL / WATERMARK / TOMBSTONES (D8)
+-----------------------------------------------------------------------
+PosFeedEvent — the MINIMAL schema (one table + one enum; migration
+20260821160000_add_pos_feed_events):
+  - What it versions: the POS-relevant catalog entities (PRODUCT,
+    PRODUCT_VARIANT, PRICE).
+  - Who increments: the server, at each catalog mutation, within that
+    mutation's transaction (the feed row IS the watermark bump);
+    feedSeq is UNIQUE per tenant and CHECK > 0.
+  - Watermark meaning: feedSeq is the per-tenant monotonic version; a
+    device's cursor is the last feedSeq it consumed.
+  - Consumption: GET /pos/feed?since=<cursor> -> ordered entries
+    (feedSeq > since, asc, take 100) + nextCursor = the highest
+    delivered feedSeq (or `since` when empty). The half-open interval
+    gives deterministic resume: no missed changes, no duplicate
+    application, reconnect at any point.
+  - Deletion: kind='DELETED' tombstone rows (entity kind + id) — the
+    device removes the local row.
+  - Tenant isolation: PosFeedEvent is in TENANT_SCOPED_MODELS; every
+    read is force-scoped (integration-proven: tenant B rows never leak
+    into tenant A's feed and vice versa); cursors embed no tenant data.
+  - NOT event sourcing: no replay-to-state machinery, no broker, no
+    generic event store — a flat versioned log.
+
+-----------------------------------------------------------------------
+10. SALE EXECUTION + CASH PAYMENT (through the existing engine)
+-----------------------------------------------------------------------
+When all preconditions pass, sync calls PosSaleService.createSale
+exactly as the online flow does — with the intent's items, the
+recorded optional customerId, method CASH (D5: offline is cash-only;
+no offline card exists anywhere in the protocol), and the internal
+allowClosedSession option (set only after full D6/D7 revalidation).
+The engine performs T1 (server pricing + guarded store-pool decrement
++ snapshots), T5 (payment derived from the Order), T2 (immediate cash
+capture -> Order PAID + Payment CAPTURED), and writes the PosSale
+provenance. Sync then persists the operation's final result
+atomically (ACCEPTED + resultOrderId/resultPaymentId). NO sale logic
+is duplicated; the Cart is never touched.
+
+-----------------------------------------------------------------------
+11. SECURITY TESTS (all integration-proven)
+-----------------------------------------------------------------------
+  401 without cashier JWT ................. PASS
+  401 without device credential .......... PASS
+  401 wrong device credential ............ PASS (constant-time verify)
+  401 credential of a different device ... PASS (ownership of the op)
+  409 suspended device at sync ............ PASS (revocation)
+  404 non-opener caller (ownership) ...... PASS (uniform, no oracle)
+  403 demoted cashier (D7) ............... PASS (op left PENDING,
+                                              zero execution)
+  403 outsider .......................... PASS
+  404 cross-tenant operation sync ......... PASS (state untouched)
+  tenantId/deviceId/storeId/sessionId/
+  cashierId injection ................... N/A-by-design: none are
+      accepted in the request shape at all (nothing to inject).
+  client UUID reuse ....................... the durable replays (id
+      implies the (device, clientUuid) identity) return the same
+      result with no second execution — PASS.
+  already-accepted retry ................. PASS (same durable ids)
+  already-rejected retry ................. PASS (unchanged outcome)
+  no cross-tenant/device information
+  leakage ............................... PASS (feed + sync 404s)
+
+-----------------------------------------------------------------------
+12. BUSINESS TESTS (all integration-proven)
+-----------------------------------------------------------------------
+  successful cash sale sync (Order PAID, Payment CAPTURED,
+    stock decremented, provenance, exact 3750n totals) ......... PASS
+  PRICE_CHANGED (immutable, retry-stable, nothing executed) ..... PASS
+  OUT_OF_STOCK (all-or-nothing, stock untouched) ................ PASS
+  missing variant (VARIANT_NOT_FOUND) ........................... PASS
+  mixed currency (CURRENCY_MIX — existing uniform rule) ........ PASS
+  closed historical session syncs (provenance retained,
+    authority revalidated) ...................................... PASS
+  cash-only payment (method CASH; no offline card path exists) .. PASS
+  no partial fulfillment / no negative inventory / no silent
+    repricing / no silent quantity reduction ................... PASS
+    (validated pre-mutation + the engine's own guards + direct DB
+    row assertions)
+  two operations same device / different devices ............... PASS
+  CONCURRENT SYNC (the mandatory race): two parallel syncs of one
+    operation -> both callers the SAME ACCEPTED result, exactly ONE
+    Order, ONE Payment, stock decremented exactly once ........... PASS
+
+-----------------------------------------------------------------------
+13. FULL REGRESSION RESULTS (ACTUAL RUNS, 2026-08-31)
+-----------------------------------------------------------------------
+  Focused P4-U5 unit suite        : 21/21 passed
+  Focused P4-U5 integration suite: 1 suite, 18/18 passed
+  Full unit suite (jest.unit.json): 50 suites, 742/742 passed
+                                   (post-P4-U4: 49/721; +1 suite +21)
+  Full integration suite
+  (jest.integration.json)         : 26 suites, 652/652 passed
+                                   (post-P4-U4: 25/634; +1 suite +18;
+                                   every pre-existing suite green —
+                                   P4-U1/U2/U3/U4 verified unchanged;
+                                   the known inventory parallel-load
+                                   flakiness did NOT reproduce)
+  npm run lint                    : 2 errors — both the KNOWN
+                                   PRE-EXISTING asset.service.spec.ts
+                                   :203/:221; zero new issues
+  npm run build (type-check)      : success
+  npx prettier --check            : all files pass
+  npx prisma validate             : valid
+  npx prisma migrate status       : up to date (19 migrations)
+
+-----------------------------------------------------------------------
+14. KNOWN ISSUES
+-----------------------------------------------------------------------
+PRE-EXISTING (separate from P4-U5; untouched):
+  - src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+  - Inventory concurrent-increment flakiness under parallel suite load
+    (did not reproduce in this unit's final gate).
+
+P4-U5 DEFECTS: none. A real bug found during the unit's own
+development (missing `await` on assertSyncAuthority — an unhandled
+rejection) was fixed BEFORE verification; the nested-transaction
+limitation was discovered empirically and designed around (documented
+in §2/§6) — not a defect.
+
+-----------------------------------------------------------------------
+15. PHASE 3 + PRIOR-CHECKPOINT COMPATIBILITY
+-----------------------------------------------------------------------
+ZERO behavior changes: no Phase 3 table touched; Order/Payment/
+Inventory/Cart semantics unchanged; createSale gained ONE
+default-off internal option; existing 18 migrations untouched;
+existing RBAC keys reused; deploy-only discipline preserved.
+
+-----------------------------------------------------------------------
+16. FILES CHANGED
+-----------------------------------------------------------------------
+Created:
+  prisma/migrations/20260821160000_add_pos_feed_events/migration.sql
+  src/pos/pos-sync.service.ts / .spec.ts
+  src/pos/pos-sync.integration.spec.ts
+  docs/phase4_p4u5_report.txt (this file)
+Modified:
+  prisma/schema.prisma (PosFeedEvent + Tenant.posFeedEvents)
+  src/common/database/prisma/tenant-scoping.extension.ts (+1 model)
+  src/pos/pos-sale.service.ts (internal allowClosedSession option)
+  src/pos/pos.controller.ts (+2 routes)
+  src/pos/pos.module.ts (+ PosSyncService)
+  docs/phase-progress.md
+
+-----------------------------------------------------------------------
+17. GIT
+-----------------------------------------------------------------------
+(Recorded after the operations succeeded.)
+
+  Commit message  : feat(pos): implement P4-U5 sync protocol
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS — working tree clean after push
+
+=======================================================================
+FINAL BOUNDARY
+=======================================================================
+  P4-U5 COMPLETE -> DOCUMENTED -> COMMITTED -> PUSHED -> HARD STOP.
+  DO NOT start P4-U6 (Offline Payment Boundary) or any later checkpoint.
+  Each requires separate explicit approval.
+=======================================================================
