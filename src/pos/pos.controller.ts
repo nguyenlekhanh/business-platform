@@ -25,6 +25,7 @@ import { PermissionsGuard } from '../rbac/permissions.guard';
 import { Paginated } from '../common/pagination/paginate';
 import {
   CreatePosDeviceDto,
+  CreatePosSaleDto,
   OpenPosSessionDto,
   PosDeviceListQueryDto,
   UpdatePosDeviceDto,
@@ -35,6 +36,7 @@ import {
   PosDeviceSummary,
 } from './pos-device.service';
 import { PosSessionService, PosSessionSummary } from './pos-session.service';
+import { PosSaleService, PosSaleSummary } from './pos-sale.service';
 
 /**
  * POS foundation endpoints — Phase 4 P4-U1.
@@ -63,6 +65,7 @@ export class PosController {
   constructor(
     private readonly deviceService: PosDeviceService,
     private readonly sessionService: PosSessionService,
+    private readonly saleService: PosSaleService,
   ) {}
 
   // ---- Devices ---------------------------------------------------------
@@ -163,5 +166,34 @@ export class PosController {
   @ApiOperation({ summary: 'Close an OPEN POS session' })
   closeSession(@Param('id') id: string): Promise<PosSessionSummary> {
     return this.sessionService.closeSession(id);
+  }
+
+  // ---- Sales (P4-U2: online POS sale) -----------------------------------
+
+  @Post('sales')
+  @RequirePermission(PERMISSIONS.POS_CREATE)
+  @ApiOperation({
+    summary:
+      'Create an online POS sale (Order via Core Commerce T1, Payment via T5; CASH captures via T2)',
+  })
+  createSale(
+    @CurrentUser() user: JwtUser,
+    @Body() dto: CreatePosSaleDto,
+  ): Promise<PosSaleSummary> {
+    return this.saleService.createSale(user.userId, dto);
+  }
+
+  @Get('sales/:id')
+  @RequirePermission(PERMISSIONS.POS_READ)
+  @ApiOperation({ summary: 'Get POS sale by id (provenance view)' })
+  getSale(@Param('id') id: string): Promise<PosSaleSummary> {
+    return this.saleService.getSale(id);
+  }
+
+  @Get('sessions/:id/sales')
+  @RequirePermission(PERMISSIONS.POS_READ)
+  @ApiOperation({ summary: "List a POS session's sales (shift history)" })
+  listSessionSales(@Param('id') id: string): Promise<PosSaleSummary[]> {
+    return this.saleService.listSessionSales(id);
   }
 }

@@ -8,5 +8,6 @@ import { OrderService } from './order.service';
   imports: [TenantModule, RbacModule],
   controllers: [OrderController],
   providers: [OrderService],
+  exports: [OrderService],
 })
 export class OrderModule {}

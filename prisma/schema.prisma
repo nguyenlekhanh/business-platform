@@ -412,6 +412,7 @@ model Order {
   customer Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
   items    OrderItem[]
   payments Payment[]
+  posSale  PosSale?
 
   @@index([tenantId])
   @@index([tenantId, createdAt, id])
@@ -468,6 +469,7 @@ model Payment {
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   order  Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  posSale PosSale?
 
   @@index([tenantId])
   @@index([tenantId, createdAt, id])
@@ -510,6 +512,7 @@ model PosDevice {
   tenant   Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   store    Store        @relation(fields: [storeId], references: [id], onDelete: Restrict)
   sessions PosSession[]
+  sales    PosSale[]
 
   @@unique([tenantId, name])
   @@index([tenantId])
@@ -535,10 +538,48 @@ model PosSession {
   device PosDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   store  Store     @relation(fields: [storeId], references: [id], onDelete: Restrict)
   user   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sales  PosSale[]
 
   @@index([tenantId])
   @@index([tenantId, createdAt, id])
   @@index([deviceId, status])
+  @@index([userId])
+}
+
+// ---------- pos: sales (Phase 4 P4-U2) ----------
+// A PosSale is the ONLINE POS-sale provenance record linking an Order to the
+// POS context that produced it (device, session, store, cashier). It is an
+// ADDITIVE association: the Order/Payment state machines are untouched, and
+// every amount/price/snapshot stays computed by the Core Commerce services.
+// One PosSale per Order (orderId UNIQUE) and per Payment (paymentId UNIQUE).
+// Inventory: sales decrement the existing tenant-level single pool until the
+// approved P4-U3 multi-store scope lands (D2).
+model PosSale {
+  id        String @id @default(cuid())
+  tenantId  String
+  orderId   String   @unique
+  paymentId String   @unique
+  sessionId String
+  deviceId  String // denormalized from the session for provenance queries
+  storeId  String // denormalized from the session's device (A5 binding)
+  userId    String // cashier who made the sale (the session opener)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  order   Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  payment Payment    @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  session PosSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  device  PosDevice  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  store   Store      @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  user    User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt, id])
+  @@index([sessionId])
+  @@index([deviceId])
+  @@index([storeId])
   @@index([userId])
 }
 
@@ -555,6 +596,7 @@ model User {
   carts        Cart[]
   orders       Order[]
   posSessions  PosSession[]
+  posSales     PosSale[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -606,6 +648,7 @@ model Tenant {
   payments    Payment[]
   posDevices  PosDevice[]
   posSessions PosSession[]
+  posSales    PosSale[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -704,4 +747,5 @@ model Store {
   assets Asset[]
   posDevices PosDevice[]
   posSessions PosSession[]
+  posSales    PosSale[]
 }

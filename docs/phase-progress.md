@@ -3008,3 +3008,123 @@ user approval.
 
 HARD STOP â€” P4-U1 complete; do not start P4-U2 without explicit approval.
 
+---
+
+## PHASE 4 P4-U2 â€” ONLINE POS SALE COMPLETE (2026-08-31)
+
+STATUS: **P4-U2 = COMPLETE** (implemented, verified, documented). Scope
+delivered EXACTLY per the approved unit: the ONLINE POS sale flow â€” device ->
+OPEN session -> sale -> Order + Payment -> finalized â€” as a thin, store-
+scoped orchestration ON TOP of the existing Core Commerce engines. NO offline
+queues, NO sync, NO multi-store inventory redesign, NO refunds/voids/returns/
+webhooks/external providers. P4-U3 NOT started; awaiting explicit approval.
+
+CORE PRINCIPLE HONORED (no parallel commerce system):
+- Order creation = the EXISTING OrderService.createOrder (T1: server-
+  authoritative pricing, uniform currency, guarded stock decrement, immutable
+  snapshots, exact BigInt totals, cart conversion untouched).
+- Payment = the EXISTING PaymentService.createPayment (T5: amount/currency
+  derived from the Order).
+- CASH (default) captures immediately via the EXISTING capturePayment (T2:
+  guarded PROCESSING->CAPTURED + Order PENDING->PAID, atomic) â€” "cash is
+  captured when tendered", the approved D5 pattern. CARD stays PROCESSING
+  and is finalized by the EXISTING POST /payments/:id/capture endpoint.
+- No new Order/Payment states, no duplicated money math, no inventory logic.
+- Minimal integration point: OrderModule gained exports: [OrderService] (one
+  additive line; PaymentModule already exported PaymentService).
+
+MIGRATION (exactly one, additive, applied via prisma migrate deploy):
+- 20260821130000_add_pos_sale
+  CREATE TABLE "PosSale" (id TEXT PK cuid, tenantId, orderId UNIQUE,
+  paymentId UNIQUE, sessionId, deviceId, storeId, userId, timestamps);
+  indexes (tenantId), (tenantId,createdAt,id), (sessionId), (deviceId),
+  (storeId), (userId); FKs tenant CASCADE, order CASCADE, payment CASCADE,
+  session CASCADE, device CASCADE, store RESTRICT, user CASCADE.
+  PosSale is pure PROVENANCE (one per Order and per Payment â€” the Order
+  state machine is untouched). No existing objects modified. 16/16 up to
+  date.
+
+FILES CHANGED (10):
+- prisma/schema.prisma (PosSale model + backrelations on Order/Payment/
+  PosSession/PosDevice/Tenant/User/Store â€” all additive)
+- prisma/migrations/20260821130000_add_pos_sale/migration.sql (new)
+- src/common/database/prisma/tenant-scoping.extension.ts ('PosSale' in
+  TENANT_SCOPED_MODELS â€” 16 models now)
+- src/order/order.module.ts (exports OrderService â€” the minimal reuse point)
+- src/pos/dto/pos.dto.ts (PosSaleItemDto, CreatePosSaleDto: sessionId +
+  items[ArrayMinSize 1] + optional method[CASH|CARD] + optional customerId;
+  whitelist rejects tenantId/storeId/deviceId/cashierId/orderId/paymentId/
+  status/bogus)
+- src/pos/pos-sale.service.ts (context validation: session OPEN + device
+  ACTIVE + session-opener-is-the-cashier binding [non-opener gets uniform
+  404]; orchestration T1->T5->(T2 for CASH); provenance row; getSale +
+  listSessionSales projections through the commerce summaries)
+- src/pos/pos.controller.ts (POST /pos/sales pos:create; GET /pos/sales/:id
+  pos:read; GET /pos/sessions/:id/sales pos:read; standard guard chain +
+  whitelist pipes)
+- src/pos/pos.module.ts (imports OrderModule + PaymentModule; provides +
+  exports PosSaleService)
+- Tests: src/pos/pos-sale.service.spec.ts (13 unit), src/pos/
+  pos-sale.integration.spec.ts (16 integration), src/pos/dto/pos.dto.spec.ts
+  (+14 sale DTO tests)
+
+DESIGN WITHIN APPROVED BOUNDS (no invented business rules):
+- Anonymous/walk-in sales: existing documented Phase 3 rule (Order.customerId
+  nullable; "the entire commerce flow works with zero customers") â€” optional
+  customerId forwards through the existing order path.
+- Payment methods: CASH (auto-capture per D5) | CARD (PROCESSING until the
+  existing capture endpoint) â€” both use only existing Payment semantics.
+- Sale permission: the existing pos:create key (register + open-session
+  + sell); employees stay read-only per A1. No new keys.
+- Inventory: the existing tenant-level single pool + guarded decrement
+  (store-scoped pools are P4-U3's approved D2 scope; deferred, not changed).
+- Post-capture re-read: toSummary reflects the post-T2 Order (PAID) via the
+  commerce getOrder â€” the summary mirrors the existing state machines.
+
+VERIFICATION RESULTS (exact, actual runs, full gate re-run after lint fixes):
+- Focused P4-U2: unit 4/4 suites 64/64 POS tests incl. sale spec 13/13;
+  integration pos-sale suite 16/16.
+- Full unit suite (jest.unit.json): 48 suites, 695/695 passed
+  (was 47/678 post-P4-U1; +1 suite +17 tests exactly).
+- Full integration suite (jest.integration.json): 23 suites, 606/606 passed
+  (was 22/590; +1 suite +16 tests exactly; every pre-existing suite
+  unchanged and green).
+- npm run format / npx prettier --check: clean.
+- npm run lint: 2 problems â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221. Zero new lint issues (5 new
+  errors found during the gate were fixed before recording results).
+- npm run build (nest build): success.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (16 migrations). npx prisma generate: v6.19.3.
+
+KEY TEST COVERAGE (integration, real AppModule + supertest + real DB):
+- Happy path: aggregate same-variant lines (2+1 -> 3), subtotal '3750' exact
+  string BigInt, snapshots, stock 30->27, Order PAID + Payment CAPTURED
+  rows verified directly, provenance (session/device/store/cashier) correct,
+  sale retrievable, shift history lists the sale.
+- CARD path: PROCESSING/PENDING finalized by the EXISTING capture endpoint
+  (requires payment:manage â€” Phase 3 behavior intact).
+- Walk-in sale (customerId null) + named-customer sale.
+- Lifecycle gates: CLOSED session 409 'Only open sessions can create sales';
+  SUSPENDED device 409 'Device is not active' (resume restores); RETIRED
+  device 409; non-opener member gets uniform 404 (cashier binding).
+- Inventory: insufficient stock 409 with ZERO Order/Payment/PosSale rows and
+  stock untouched; two devices racing the last units -> exactly [201, 409],
+  stock 2->0, one sale row (DB guarded decrement arbitrates â€” no sleeps).
+- Security: 401/403 outsider; employee read-only 403; owner semantic-all
+  sells; cross-tenant session/sale/shift-list uniformly 404 with tenant A
+  intact and zero leakage into tenant B; tenantId/storeId/deviceId/
+  cashierId/orderId/paymentId/status/bogus injections all 400; two stores
+  in one tenant: provenance follows the SESSION's device binding, never the
+  client.
+
+PHASE 3 COMPATIBILITY: ZERO Phase 3 behavior changes. Order/Payment state
+machines, money representation, inventory guards, Cart, tenant isolation,
+and RBAC semantics untouched; OrderModule gained only an export; the one new
+table is provenance-only; existing 15 migrations untouched.
+
+NEXT CHECKPOINT: P4-U3 â€” Multi-store Inventory (the approved D2 Option A).
+NOT started; awaiting explicit user approval.
+
+HARD STOP â€” P4-U2 complete; do not start P4-U3 without explicit approval.
+

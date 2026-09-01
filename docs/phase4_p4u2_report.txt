@@ -1,0 +1,284 @@
+=======================================================================
+ PHASE 4 — POS + OFFLINE SYNC
+ P4-U2 — ONLINE POS SALE
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 4, Unit 2 (Online POS Sale)
+Date       : 2026-08-31
+Status     : COMPLETE — implemented, verified, documented, committed,
+             pushed. HARD STOP before P4-U3.
+Starting
+Git commit : 3097fb2 ("feat(pos): implement P4-U1 POS foundation")
+Governing
+documents : docs/phase4_discovery_report.txt (§16 D1–D10),
+             docs/phase4_p4u1_plan.txt / _report.txt (A1–A6)
+
+-----------------------------------------------------------------------
+1. SCOPE
+-----------------------------------------------------------------------
+The ONLINE POS sale flow only:
+  POS Device -> OPEN PosSession -> POS sale -> existing commerce pricing ->
+  existing inventory validation/decrement -> existing Order creation ->
+  existing cash Payment flow -> finalized POS sale.
+
+Explicitly NOT implemented (later units): offline sync, offline operation
+queues, multi-store inventory redesign (P4-U3's approved D2 scope),
+refunds, returns, voids, external payment providers, webhooks.
+
+-----------------------------------------------------------------------
+2. CORE PRINCIPLE — NO PARALLEL COMMERCE SYSTEM
+-----------------------------------------------------------------------
+POS is a thin, store-scoped orchestration over the REAL Core Commerce
+engines. Every financial behavior is delegated:
+  - ORDER: the existing OrderService.createOrder (Phase 3 T1) — server-
+    authoritative pricing, uniform-currency validation, guarded stock
+    decrement (decrement-on-order), immutable OrderItem snapshots, exact
+    BigInt totals. NOT duplicated.
+  - PAYMENT: the existing PaymentService.createPayment (T5 — amount and
+    currency derived server-side from the Order). NOT duplicated.
+  - CASH CAPTURE: the existing PaymentService.capturePayment (T2 — guarded
+    PROCESSING->CAPTURED plus Order PENDING->PAID, atomic). CASH is the
+    default method and captures immediately ("cash is captured when
+    tendered", the approved D5 pattern). CARD leaves the Payment
+    PROCESSING, finalized by the EXISTING POST /payments/:id/capture
+    endpoint with its existing payment:manage permission.
+  - INVENTORY: the existing tenant-level single pool and guarded update —
+    unchanged (store-scoped pools are P4-U3's approved scope).
+  - MONEY: no new arithmetic anywhere; PosSaleSummary only mirrors the
+    Order/Payment string-BigInt values.
+
+Minimal integration point: OrderModule gained `exports: [OrderService]`
+(one additive line; no Order behavior changed). PaymentModule already
+exported PaymentService. PosModule imports both.
+
+-----------------------------------------------------------------------
+3. SCHEMA / MIGRATION
+-----------------------------------------------------------------------
+ONE additive handwritten-SQL migration (deploy-only discipline):
+  20260821130000_add_pos_sale
+
+  PosSale — pure PROVENANCE linking the commerce artifacts to the POS
+  context that produced them:
+    id cuid PK, tenantId, orderId (UNIQUE -> Order, CASCADE),
+    paymentId (UNIQUE -> Payment, CASCADE), sessionId (-> PosSession,
+    CASCADE), deviceId (denormalized, -> PosDevice CASCADE), storeId
+    (denormalized from the session's device, -> Store RESTRICT), userId
+    (the cashier = session opener, -> User CASCADE), timestamps.
+    Indexes: [tenantId], [tenantId,createdAt,id] (keyset parity),
+    [sessionId], [deviceId], [storeId], [userId].
+
+  WHY: the Order/Payment state machines and financial semantics are
+  FROZEN (Phase 3), so POS provenance is an ADDITIVE association, not an
+  Order extension. UNIQUE(orderId)/UNIQUE(paymentId) guarantee exactly one
+  POS association per commerce artifact. Denormalized device/store/user
+  give stable provenance queries even if the session row is later pruned.
+
+  Tenant scoping: 'PosSale' registered in TENANT_SCOPED_MODELS (16 scoped
+  models). No existing objects modified; 16 migrations total, up to date.
+
+-----------------------------------------------------------------------
+4. API SURFACE
+-----------------------------------------------------------------------
+POST /pos/sales                pos:create   201 PosSaleSummary
+  { sessionId, items: [{variantId, quantity(1..1e6)}] (ArrayMinSize 1),
+    method?: 'CASH'|'CARD' (default CASH), customerId? }
+GET  /pos/sales/:id            pos:read     200 PosSaleSummary (provenance)
+GET  /pos/sessions/:id/sales   pos:read     200 PosSaleSummary[] (shift)
+
+Error semantics (all existing vocabulary): unknown/foreign session ->
+404 'POS session not found'; non-opener cashier -> the same uniform 404
+(cashier binding: the sale is attributed to exactly the session opener);
+CLOSED session -> 409 'Only open sessions can create sales'; SUSPENDED/
+RETIRED device -> 409 'Device is not active'; upstream commerce failures
+surface unchanged (409 'Insufficient stock', 404 'Variant not found',
+409 'Variant is not active', 409 currency/price errors, 404 'Customer not
+found'); whitelist violations -> 400.
+
+AUTHORITY MODEL: the client supplies ONLY sessionId + items (+ optional
+method/customerId). Tenant comes from context; store/device/cashier are
+DERIVED from the session row; orderId/paymentId/status/tenantId/storeId/
+deviceId/cashierId injections are rejected 400 by the whitelist.
+
+-----------------------------------------------------------------------
+5. POS / CORE-COMMERCE INTEGRATION FLOW (as implemented)
+-----------------------------------------------------------------------
+  1. Tenant-scoped session lookup (uniform 404) -> must be OPEN ->
+     device must be ACTIVE -> session.userId MUST equal the authenticated
+     principal (the cashier of record).
+  2. OrderService.createOrder(cashierId, items[, customerId]) — the
+     existing T1 validates variants ACTIVE, derives server prices,
+     enforces uniform currency, guarded-decrements stock, writes the
+     Order + immutable OrderItems.
+  3. PaymentService.createPayment({orderId, method}) — the existing T5
+     derives amount/currency from the Order.
+  4. If CASH: PaymentService.capturePayment(paymentId) — the existing
+     T2 atomically flips Payment CAPTURED + Order PAID; the Order is then
+     re-read through the commerce service so the summary reflects PAID.
+  5. PosSale provenance row (session/device/store/cashier derived from the
+     session; tenant from context).
+
+-----------------------------------------------------------------------
+6. CUSTOMER BEHAVIOR
+-----------------------------------------------------------------------
+No new customer model or rule. Walk-in/anonymous sales are the documented
+Phase 3 behavior (Order.customerId is nullable — "the entire commerce flow
+works with zero customers"); an optional customerId is forwarded through
+the existing order path and validated by it (404 'Customer not found',
+foreign customer 404 — existing semantics).
+
+-----------------------------------------------------------------------
+7. INVENTORY BEHAVIOR (verified)
+-----------------------------------------------------------------------
+All existing guards reused and verified: sufficient stock succeeds and
+decrements exactly the aggregated quantity; insufficient stock rejects the
+sale (409 'Insufficient stock') leaving stock, Order, Payment, and PosSale
+rows completely untouched (verified by direct DB counts — T1 atomicity);
+concurrent sales on the same last units cannot oversell (deterministic
+two-device race: exactly [201, 409], stock 2 -> 0, one sale row — the DB
+guarded update arbitrates); no negative stock possible (guarded update +
+DB CHECK unchanged). Cancellation/restock semantics are unchanged Phase 3
+behavior and were NOT modified in this unit.
+
+-----------------------------------------------------------------------
+8. PAYMENT BEHAVIOR (verified)
+-----------------------------------------------------------------------
+The existing state machine is preserved verbatim (PROCESSING -> CAPTURED |
+FAILED; terminal immutable; idempotent re-capture; T5 duplicate-CAPTURED
+guard; no new PaymentStatus values; no refunds/reversals/webhooks/
+providers). CASH: T5 then immediate T2 — final Payment CAPTURED + Order
+PAID inside the sale. CARD: T5 only; the EXISTING capture endpoint (with
+its existing payment:manage permission) finalizes the sale, after which
+the POS sale projection shows CAPTURED/PAID.
+
+-----------------------------------------------------------------------
+9. SECURITY (verified by integration tests)
+-----------------------------------------------------------------------
+  - Session/device/store/cashier context is server-derived from the OPEN
+    session; the client cannot select a store or device, impersonate a
+    cashier, or forge provenance.
+  - 401 unauthenticated on all three new routes; 403 for outsiders and
+    for employees (pos:read only — A1 preserved; POS selling requires the
+    existing pos:create key; no permission broadening).
+  - Cross-tenant: selling on a foreign session, reading a foreign sale,
+    and listing a foreign session's sales all return uniform 404, with
+    tenant A's rows intact and ZERO Order/Payment/PosSale leakage into
+    tenant B (direct DB verification).
+  - Injections (tenantId/storeId/deviceId/cashierId/orderId/paymentId/
+    status/bogus) all 400.
+  - Two stores within one tenant: each sale's provenance follows its own
+    session's device binding (store 1 device -> store 1; store 2 device ->
+    store 2) — never a client-asserted store.
+
+-----------------------------------------------------------------------
+10. CONCURRENCY (deterministic, DB-backed, no sleeps)
+-----------------------------------------------------------------------
+Two devices (different stores, different cashiers) racing the same last
+two units of a variant: exactly one 201 + one 409 'Insufficient stock';
+final stock 0 (never oversold); exactly one PosSale row. The database
+guarded decrement inside the existing T1 remains the sole arbiter —
+identical to the Phase 3/U8 order race semantics.
+
+-----------------------------------------------------------------------
+11. TESTS
+-----------------------------------------------------------------------
+Unit (jest.unit.json):
+  - src/pos/pos-sale.service.spec.ts (13): fail-closed; session 404/
+    CLOSED 409; device SUSPENDED/RETIRED 409; non-opener cashier 404 with
+    no downstream calls; CASH orchestration asserts the EXACT calls into
+    OrderService/PaymentService (T1 with sale items, T5 with order id,
+    T2 with payment id) and session-derived provenance; CARD leaves
+    PROCESSING with no T2; optional customerId forwarded; upstream
+    ConflictException propagated unchanged; getSale/listSessionSales
+    projections.
+  - src/pos/dto/pos.dto.spec.ts (+14 for CreatePosSaleDto): valid shapes;
+    missing/empty items (ArrayMinSize), bad quantities (0/fractional/
+    string/over-max); invalid method; authority-field injections 400.
+
+Integration (jest.integration.json):
+  - src/pos/pos-sale.integration.spec.ts (16): full happy path (aggregation
+    2+1 -> 3, subtotal '3750' exact string, snapshots, stock 30 -> 27,
+    Order PAID + Payment CAPTURED rows verified directly, provenance
+    correct, sale retrieval + shift history); CARD path finalized via the
+    EXISTING capture endpoint; walk-in (customerId null) and named-
+    customer sales; lifecycle gates (CLOSED session / SUSPENDED device
+    with resume-restore / RETIRED device / non-opener 404); insufficient
+    stock leaves zero rows; two-device last-unit race; RBAC (outsider 403,
+    employee 403, owner semantic-all); cross-tenant uniform 404 with zero
+    leakage; injection matrix; two-store provenance-follows-session.
+
+-----------------------------------------------------------------------
+12. VERIFICATION RESULTS (ACTUAL RUNS, 2026-08-31)
+-----------------------------------------------------------------------
+  Focused P4-U2 integration suite : 1 suite, 16/16 passed
+  Full unit suite                 : 48 suites, 695/695 passed
+                                    (post-P4-U1: 47/678; +1 suite +17)
+  Full integration suite          : 23 suites, 606/606 passed
+                                    (post-P4-U1: 22/590; +1 suite +16;
+                                    every pre-existing suite green)
+  npm run lint                    : 2 errors — both the KNOWN
+                                    PRE-EXISTING asset.service.spec.ts
+                                    :203/:221; zero new issues
+  npm run build (type-check)      : success
+  npx prettier --check            : all files pass
+  npx prisma validate            : valid
+  npx prisma migrate status      : up to date (16 migrations)
+
+-----------------------------------------------------------------------
+13. KNOWN ISSUES
+-----------------------------------------------------------------------
+PRE-EXISTING (separate from P4-U2; untouched):
+  - src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+  - Inventory concurrent-increment flakiness under parallel load (did
+    NOT reproduce in this run).
+
+P4-U2 DEFECTS: none. Test-side corrections during the gate (documented):
+fixture permission gap (CARD-capture test needed payment:manage — Phase 3
+RBAC was working correctly); five lint type-safety fixes; one summary
+re-read so the CASH sale projection reflects the post-T2 Order (PAID).
+
+-----------------------------------------------------------------------
+14. PHASE 3 COMPATIBILITY
+-----------------------------------------------------------------------
+ZERO Phase 3 behavior changes: Order/Payment state machines, money
+representation (BigInt minor units, string JSON), inventory semantics,
+Cart, tenant isolation, and RBAC semantics untouched. OrderModule gained
+only `exports: [OrderService]`. The single new table is provenance-only.
+Existing 15 migrations untouched; deploy-only discipline preserved.
+
+-----------------------------------------------------------------------
+15. FILES CHANGED
+-----------------------------------------------------------------------
+Created:
+  prisma/migrations/20260821130000_add_pos_sale/migration.sql
+  src/pos/pos-sale.service.ts, src/pos/pos-sale.service.spec.ts
+  src/pos/pos-sale.integration.spec.ts
+  docs/phase4_p4u2_report.txt (this file)
+Modified:
+  prisma/schema.prisma (PosSale model + additive backrelations)
+  src/common/database/prisma/tenant-scoping.extension.ts ('PosSale')
+  src/order/order.module.ts (exports OrderService — minimal reuse point)
+  src/pos/dto/pos.dto.ts (+ PosSaleItemDto/CreatePosSaleDto)
+  src/pos/dto/pos.dto.spec.ts (+14 tests)
+  src/pos/pos.controller.ts (+3 routes)
+  src/pos/pos.module.ts (+ OrderModule/PaymentModule imports, PosSaleService)
+  docs/phase-progress.md
+
+-----------------------------------------------------------------------
+16. GIT
+-----------------------------------------------------------------------
+(Recorded after the operations succeeded.)
+
+  Commit message  : feat(pos): implement P4-U2 online POS sale
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS — working tree clean after push
+
+=======================================================================
+FINAL BOUNDARY
+=======================================================================
+  P4-U2 COMPLETE -> DOCUMENTED -> COMMITTED -> PUSHED -> HARD STOP.
+  DO NOT start P4-U3 (Multi-store Inventory), P4-U4+ (offline model,
+  sync, payment boundary, reconciliation), Phase 5+, refunds, webhooks,
+  or external providers. Each requires separate explicit approval.
+=======================================================================

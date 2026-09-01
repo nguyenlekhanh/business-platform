@@ -1,10 +1,17 @@
 import {
+  ArrayMinSize,
+  IsArray,
   IsIn,
+  IsInt,
   IsNotEmpty,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
+  Min,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import type { PosDeviceStatus } from '@prisma/client';
 import { PageQueryDto } from '../../common/pagination/pagination-query.dto';
 
@@ -52,4 +59,55 @@ export class OpenPosSessionDto {
   @IsString()
   @IsNotEmpty()
   deviceId!: string;
+}
+
+/**
+ * Online POS sale line — Phase 4 P4-U2. The server is the price/stock
+ * authority (Phase 3 T1 behavior); the client supplies only the variant and
+ * quantity. NOTE: unlike the P4-U4+ offline intent snapshot, an ONLINE sale
+ * does NOT carry a device-observed price — pricing is live and authoritative
+ * exactly like POST /orders.
+ */
+export class PosSaleItemDto {
+  @IsString()
+  @IsNotEmpty()
+  variantId!: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(1_000_000)
+  quantity!: number;
+}
+
+/**
+ * Online POS sale — Phase 4 P4-U2. Creates an Order via the existing Core
+ * Commerce T1 (server pricing, guarded stock decrement, snapshots), a
+ * Payment via the existing T5, links them to the POS context (session ->
+ * device -> store, cashier = session opener), and — for CASH — captures
+ * immediately via the existing T2 (cash is captured when tendered, the
+ * approved D5 pattern). Non-cash methods leave the Payment PROCESSING for
+ * the existing POST /payments/:id/capture flow. customerId is optional
+ * (anonymous/walk-in sales are documented Phase 3 behavior: Order.customerId
+ * is nullable). status/order/payment/device/store/cashier are never
+ * client-writable.
+ */
+export class CreatePosSaleDto {
+  @IsString()
+  @IsNotEmpty()
+  sessionId!: string;
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => PosSaleItemDto)
+  items!: PosSaleItemDto[];
+
+  @IsOptional()
+  @IsIn(['CASH', 'CARD'])
+  method!: 'CASH' | 'CARD';
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  customerId?: string;
 }

@@ -2,6 +2,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import {
   CreatePosDeviceDto,
+  CreatePosSaleDto,
   OpenPosSessionDto,
   PosDeviceListQueryDto,
   UpdatePosDeviceDto,
@@ -156,6 +157,102 @@ describe('POS DTOs', () => {
       for (const payload of injections) {
         expect(
           (await validateLike(OpenPosSessionDto, payload)).length,
+        ).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  describe('CreatePosSaleDto', () => {
+    it('accepts sessionId + items (+ optional method/customerId)', async () => {
+      expect(
+        await validateLike(CreatePosSaleDto, {
+          sessionId: 's',
+          items: [{ variantId: 'v', quantity: 1 }],
+        }),
+      ).toHaveLength(0);
+      expect(
+        await validateLike(CreatePosSaleDto, {
+          sessionId: 's',
+          items: [{ variantId: 'v', quantity: 2 }],
+          method: 'CASH',
+          customerId: 'c',
+        }),
+      ).toHaveLength(0);
+    });
+
+    it('rejects missing/empty items and bad quantities', async () => {
+      const cases: Array<Record<string, unknown>> = [
+        { sessionId: 's' },
+        { sessionId: 's', items: [] },
+        { sessionId: '', items: [{ variantId: 'v', quantity: 1 }] },
+        { sessionId: 's', items: [{ quantity: 1 }] },
+        { sessionId: 's', items: [{ variantId: 'v' }] },
+        { sessionId: 's', items: [{ variantId: 'v', quantity: 0 }] },
+        { sessionId: 's', items: [{ variantId: 'v', quantity: 1.5 }] },
+        { sessionId: 's', items: [{ variantId: 'v', quantity: '1' }] },
+        { sessionId: 's', items: [{ variantId: 'v', quantity: 1000001 }] },
+      ];
+      for (const payload of cases) {
+        expect(
+          (await validateLike(CreatePosSaleDto, payload)).length,
+        ).toBeGreaterThan(0);
+      }
+    });
+
+    it('rejects invalid method', async () => {
+      expect(
+        (
+          await validateLike(CreatePosSaleDto, {
+            sessionId: 's',
+            items: [{ variantId: 'v', quantity: 1 }],
+            method: 'WIRE',
+          })
+        ).length,
+      ).toBeGreaterThan(0);
+    });
+
+    it('rejects authority-field injections with 400', async () => {
+      const injections = [
+        {
+          sessionId: 's',
+          items: [{ variantId: 'v', quantity: 1 }],
+          tenantId: 't',
+        },
+        {
+          sessionId: 's',
+          items: [{ variantId: 'v', quantity: 1 }],
+          storeId: 'st',
+        },
+        {
+          sessionId: 's',
+          items: [{ variantId: 'v', quantity: 1 }],
+          deviceId: 'd',
+        },
+        {
+          sessionId: 's',
+          items: [{ variantId: 'v', quantity: 1 }],
+          cashierId: 'u',
+        },
+        {
+          sessionId: 's',
+          items: [{ variantId: 'v', quantity: 1 }],
+          orderId: 'o',
+        },
+        {
+          sessionId: 's',
+          items: [{ variantId: 'v', quantity: 1 }],
+          paymentId: 'p',
+        },
+        {
+          sessionId: 's',
+          items: [{ variantId: 'v', quantity: 1 }],
+          status: 'PAID',
+        },
+        { sessionId: 's', items: [{ variantId: 'v', quantity: 1 }], bogus: 1 },
+      ];
+      for (const payload of injections) {
+        expect(
+          (await validateLike(CreatePosSaleDto, payload)).length,
         ).toBeGreaterThan(0);
       }
     });
