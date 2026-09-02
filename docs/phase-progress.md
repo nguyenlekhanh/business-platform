@@ -3952,3 +3952,175 @@ awaiting explicit user approval.
 
 HARD STOP â€” P4-U8 complete; do not start P4-U9 without explicit approval.
 
+---
+
+## PHASE 4 P4-U9 â€” FINAL PHASE 4 VERIFICATION COMPLETE (2026-09-01)
+
+STATUS: **P4-U9 = COMPLETE. PHASE 4 â€” POS + OFFLINE SYNC = COMPLETE.**
+Final verification was an AUDIT: every frozen decision, invariant, security
+boundary, concurrency guarantee, API boundary, and migration was re-verified
+against the ACTUAL repository code, and the FULL regression gate was re-run
+with fresh results below. **Final verification required no production code
+changes** â€” the single correction is repository hygiene: three stray
+Phase-3-era scratch files (u6_checkpoint.md, u7_cp1_checkpoint.md,
+u7_cp2_checkpoint.md â€” duplicate, encoding-corrupted copies of checkpoint
+content already recorded verbatim in docs/phase-progress.md) that had been
+accidentally swept into the P4-U1 commit by a git add -A were removed
+(classification C: documentation gap; no behavior impact). No Phase 5 work
+has started.
+
+P4-U1..U8 SCOPE AUDIT (each unit re-verified: objective, approved
+decisions, implementation, tests, migration, security, commit, docs,
+regression â€” all COMPLETE, no accidental work beyond approved scope):
+- P4-U1 POS Foundation (3097fb2): PosDevice/PosSession, one-time sha256
+  credentials, A1-A6 lifecycle, pos:* RBAC, 22 integration tests. VERIFIED.
+- P4-U2 Online POS Sale (01c5178): thin orchestration over T1/T5/T2,
+  PosSale provenance, store from session, 16 integration tests. VERIFIED.
+- P4-U3 Multi-store Inventory (5cf5b7f): D2 Option A (nullable storeId,
+  partial uniques (storeId,variantId)/(variantId) WHERE NULL), all Phase 3
+  invariants preserved, 13 integration tests. VERIFIED.
+- P4-U4 Offline Operation Model (0d238a9): PosOperation/Item, idempotency
+  UNIQUE(deviceId,clientUuid), seq UNIQUE(deviceId,seq), immutable frozen
+  lines, 15 integration tests. VERIFIED.
+- P4-U5 Sync Protocol (8709f3c): D6 dual auth (JWT + X-POS-Device-
+  Credential vs op's OWN device, constant-time), D7 revalidation, D3 exact
+  BigInt PRICE_CHANGED, D4 all-or-nothing OUT_OF_STOCK, processedAt claim
+  exactly-once, D8 PosFeedEvent watermark+tombstones, 18 integration tests.
+  VERIFIED.
+- P4-U6 Payment Boundary (071a431): STRUCTURAL cash-only (internal
+  offline:true guard rejects non-CASH before any Prisma call), online
+  CARD/CASH regression-proven, 13 boundary tests. VERIFIED.
+- P4-U7 Conflict/Reconciliation (489d542): read-only reports (device
+  recovery + D9 shift report), all conflicts terminal-deterministic, no
+  manual resolution invented, 8 integration tests. VERIFIED.
+- P4-U8 Cross-device Verification (c50be56): ownership-chain matrix ZERO
+  GAPS, 9 consolidated cross-domain tests. VERIFIED.
+
+FROZEN-DECISION AUDIT (implementation location verified in code):
+- D1 sale-intents-only: PosOperationType = { SALE_INTENT } only
+  (schema.prisma:624-626). NO voids/returns/refunds/reversals/stock-
+  adjustments/price-overrides exist. SATISFIED.
+- D3 price authority: validateIntent exact BigInt compare
+  (pos-sync.service.ts:312-313) -> PRICE_CHANGED; never repriced.
+  SATISFIED.
+- D4 stock: all-or-nothing per-store pool (pos-sync.service.ts:317-322)
+  -> OUT_OF_STOCK; no negative (DB CHECK), no partial. SATISFIED.
+- D5 cash-only offline: intent DTO has NO method field; sync passes CASH;
+  offline:true structural guard (pos-sale.service.ts:111).
+  SATISFIED.
+- D6 dual auth: assertSyncAuthority (pos-sync.service.ts:227-252):
+  credential required -> OWN-device constant-time verify -> ACTIVE device.
+  SATISFIED.
+- D7 revalidation: op.userId === principal + current pos:create via
+  PermissionService (pos-sync.service.ts:245-251). SATISFIED.
+- D8 watermark+tombstones: PosFeedEvent feedSeq UNIQUE(tenantId,feedSeq),
+  PosFeedKind incl. DELETED; no event sourcing/broker anywhere.
+  SATISFIED.
+- D9 session anchor: ops retain sessionId forever; session reconciliation
+  report exists (pos-reconciliation.service.ts:98-120). SATISFIED.
+
+OFFLINE-OPERATION AUDIT: clientUuid is NOT a PK (cuid id); both UNIQUEs
+verified in schema + races proven in tests; provenance (tenant/store/device/
+session/cashier) server-derived + immutable (bit-for-bit snapshot tests);
+normalized typed items with CHECKs; no client-controlled identity field
+accepted by any DTO. SATISFIED.
+
+SYNC AUDIT: idempotent replays (accepted/rejected return durable results
+unchanged); concurrent sync exactly-once via processedAt claim (P4-U5/U6/
+U7/U8 race tests); server authoritative for price/stock/amount/context;
+closed historical session executes with allowClosedSession after D6/D7;
+stale-claim recovery documented. SATISFIED.
+
+PAYMENT BOUNDARY AUDIT: structural (not call-site) â€” offline:true guard
+throws 'Offline payment must be cash' BEFORE any Prisma call; method
+injection -> 400 (DTO has no method); amount is ALWAYS T5-derived from
+the server Order; capture endpoint keeps payment:manage; online CARD
+(PROCESSING->capture) and online CASH (immediate) regression-proven.
+SATISFIED.
+
+CONFLICT/RECONCILIATION AUDIT: duplicate/accepted are NOT conflicts;
+PRICE_CHANGED/OUT_OF_STOCK terminal-deterministic; D7 rejection leaves
+PENDING; original intent immutable; reconciliation is read-only (no write
+path in the service); reports device/session/tenant-isolated.
+SATISFIED.
+
+TENANT-ISOLATION AUDIT: all 20 models in TENANT_SCOPED_MODELS incl.
+PosDevice/PosSession/PosSale/PosOperation/PosOperationItem/PosFeedEvent
+(extension:10-35); fail-closed; the ONLY production raw SQL is the
+parameterized RBAC FOR UPDATE (no tenant-data bypass); uniform 404
+(no existence oracle) proven by the P4-U8 full-surface replay.
+SATISFIED.
+
+RBAC AUDIT: exactly pos:read/pos:create/pos:manage (admin += all three,
+employee += pos:read only â€” A1); no unnecessary P4 permission added;
+recording grants NO execution authority (sync revalidates); reconciliation
+grants NO mutation authority (read-only service). SATISFIED.
+
+API-SURFACE AUDIT (11 POS routes total): devices CRUD+lifecycle+rotate
+(pos:create/manage/read), sessions open/get/close (pos:create/read/manage),
+online sales POST /pos/sales (pos:create), offline record (pos:create),
+op get (pos:read), device ops list (pos:read), sync (pos:create + device
+credential header), feed (pos:read), 2 reconciliation reports (pos:read).
+No route accepts Order/Payment ids; no client-capture route; no inventory
+mutation through offline APIs; no provenance-mutating route; the sync
+route has NO body (nothing injectable). SATISFIED.
+
+DATABASE/MIGRATION AUDIT: 19 migrations, all applied, up to date;
+migration history additive-only + deploy-only discipline preserved
+throughout Phase 4 (slots 20260821120000..20260821160000); schema matches
+migrations (validate valid); no historical migration modified; no db
+push/reset artifacts; BigInt money everywhere (observedUnitAmountMinor/
+amountMinor/subtotalMinor BIGINT); CHECKs live in handwritten SQL.
+SATISFIED.
+
+CONCURRENCY AUDIT (all real-PostgreSQL, no sleeps): same-op concurrent
+sync (exactly one Order/Payment/stock decrement, both callers same
+result â€” U5/U6/U7/U8 suites); same-device different ops; same seq race
+([201,409], one row); different devices same numeric seq (both 201);
+same-store last-unit race ([ACCEPTED, OUT_OF_STOCK]); different stores
+independent pools; concurrent duplicate retry; concurrent report reads
+(identical pure reads). SATISFIED.
+
+SECURITY AUDIT: the consolidated matrix from U4-U8 suites covers 401
+(no JWT / no / wrong / cross-device credential), 403 (missing pos:*,
+demoted cashier, outsider), 404 (cross-tenant device/session/op/report/
+feed/Order/Payment uniform), injection (tenantId/deviceId/storeId/
+sessionId/cashierId/method/amount -> 400 whitelist or impossible-by-shape),
+with zero-mutation and zero-leakage DB assertions in every case.
+SATISFIED.
+
+FINAL REGRESSION RESULTS (exact, actual re-runs 2026-09-01):
+- Full unit suite (jest.unit.json): 51 suites, 753/753 passed.
+- Full integration suite (jest.integration.json): 29 suites, 682/682
+  passed â€” FULLY GREEN this run (the known pre-existing inventory
+  parallel-load flakiness did NOT reproduce; documented since Phase 3,
+  never claimed fixed).
+- npm run lint: 2 problems â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221. Zero new issues.
+- npm run build (nest build): success.
+- npx prettier --check: all files pass.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (19 migrations).
+
+REPOSITORY AUDIT: git status was clean pre-audit; HEAD = origin/main =
+fc770d0 pre-audit; git log reviewed for scope creep â€” ONE item found and
+corrected (classification C): the three stray root-level scratch files
+from Phase 3 (u6_checkpoint.md, u7_cp1_checkpoint.md, u7_cp2_checkpoint.md
+â€” duplicate encoding-corrupted copies of content already in
+docs/phase-progress.md, accidentally included in the P4-U1 commit) were
+removed. No temporary probe scripts remain (both P4 audit scripts were
+deleted at their units); no secrets; no debug logging; no accidental
+migration modifications.
+
+FINAL IMPLEMENTATION DECISION: **B â€” TEST/DOCUMENTATION GAP ONLY.**
+Production behavior is correct (Option A on every functional axis); the
+only correction is the repository-hygiene documentation gap above.
+No production code was modified.
+
+PHASE 4 FINAL STATE: P4-U1..U9 COMPLETE. Next: HARD STOP for Phase 5
+(Booking / Service) approval. Do NOT start Phase 5, P4-U10, additional
+offline features, offline card, new conflict types, or any refactor
+without separate explicit approval.
+
+HARD STOP â€” Phase 4 â€” POS + Offline Sync COMPLETE via P4-U9.
+
