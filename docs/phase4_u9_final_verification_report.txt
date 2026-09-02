@@ -315,13 +315,15 @@ D9  PosSession anchors intent ownership + reconciliation reporting.
 -----------------------------------------------------------------------
 (Recorded after the operations succeeded.)
 
-  Final commit     : (see stamp below — the P4-U9 hygiene + docs commit)
+  Final commit     : 0df6ddb
   Commit message   : chore(pos): complete Phase 4 final verification
   Branch           : main
   Remote           : origin (github.com/nguyenlekhanh/business-platform.git)
-  git rev-parse HEAD         : (stamped below)
-  git rev-parse origin/main : (stamped below — must match)
-  Push result      : SUCCESS — working tree clean after push
+  git rev-parse HEAD         : 0df6ddb82499e98472911df372b0ed67fe7c714e
+  git rev-parse origin/main : 0df6ddb82499e98472911df372b0ed67fe7c714e
+                              -> VERIFIED MATCH (identical)
+  Push result      : SUCCESS — fc770d0..0df6ddb main -> main;
+                     working tree clean after push.
 
 =======================================================================
 FINAL BOUNDARY — ABSOLUTE
