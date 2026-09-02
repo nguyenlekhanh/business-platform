@@ -1,0 +1,659 @@
+=======================================================================
+ PHASE 5 — BOOKING / SERVICE
+ DECISION GATE REPORT (DECISION ANALYSIS ONLY — NO IMPLEMENTATION)
+=======================================================================
+
+Checkpoint : Phase 5 Decision Gate (post-discovery, pre-implementation)
+Date       : 2026-09-01
+Status     : COMPLETE — B1-B23 analyzed; minimum approval set derived;
+             P5-U1 scope proposed (fields blocked where semantics are
+             not yet decidable). NO production code, schema, migration,
+             endpoint, RBAC key, or test was created.
+Baseline   : Discovery complete at 8ec8aca; Phase 3+4 frozen at
+             7365acf; HEAD = origin/main; tree clean.
+Authoritative
+inputs    : docs/phase5_discovery_report.txt (B1-B23 originate there),
+             docs/phase-progress.md, and re-verification of the
+             referenced code (schema.prisma, reservation EXCLUDE
+             constraint migration, Customer/Order/Store/Asset/
+             Inventory/PosDevice models, permission catalog, tenant-
+             scoping extension, all @Controller conventions).
+
+=======================================================================
+1. EXECUTIVE SUMMARY
+=======================================================================
+The discovery gate established that Booking/Service is greenfield and
+that the repository can decide the INFRASTRUCTURE but not the BUSINESS
+semantics. This gate analyzed all 23 unresolved decisions against the
+actual architecture. Findings:
+
+  - The repository has TWO proven domain templates to compose from:
+    (a) the FROZEN Reservation time-slot pattern (half-open UTC
+    windows, DB-authoritative EXCLUDE no-overlap, guarded state
+    transitions, soft-cancel, P2003 history protection) — reusable as
+    a PATTERN, never as code; and (b) the Product/Price catalog
+    pattern (tenant-scoped entity + status + BigInt minor-unit
+    price + keyset pagination).
+  - Of the 23 decisions, exactly SEVEN are architecture-critical and
+    mutually interlocking (B1, B2, B3, B4, B11, B16, B23 — plus B21
+    which is mechanical): they shape the core schema and cannot be
+    safely deferred past their unit.
+  - The repository STRONGLY supports recommendations for several of
+    them (UTC-only time, half-open windows, DB-arbitrated overlap,
+    additive catalog model, RESTRICT history protection) because
+    every one is an established, frozen, tested convention; these
+    are still presented as REQUIRES USER DECISION, with the evidence
+    stated, because Phase 5 business behavior must be approved, not
+    inferred.
+  - TEN decisions are SAFE TO DEFER (with their deferral unit named)
+    because the schema designed for the blocking cluster does not
+    depend on them.
+  - The single most expensive wrong assumption is the OVERLAP
+    CONSTRAINT TARGET (what the exclusion constraint guards). Changing
+    it after bookings exist would require dropping a live constraint
+    on a tenant table with financial history — the one refactor the
+    migration discipline forbids doing cheaply. It is therefore the
+    #1 item in the minimum approval set.
+
+MINIMUM APPROVAL REQUIRED FOR P5-U1 (summary — full list in section 5):
+  1. B2  What a Service is.
+  2. B23 How a service is priced (incl. whether P5-U1 has pricing at
+     all).
+  3. B21 The service:* RBAC keys + role defaults.
+  4. B1  What a Booking books (needed ONLY at the schema-shape level:
+     whether Service alone is bookable — if Booking is deferred to
+     P5-U4, the deferred shape must not contradict B1, but B1's full
+     resolution can ride with the availability/lifecycle cluster).
+  Everything else is deferrable to its named unit.
+
+=======================================================================
+2. B1-B23 DECISION MATRIX
+=======================================================================
+Legend: Status = FROZEN (already decidable, evidence-cited) /
+REQUIRES USER DECISION / SAFE TO DEFER (to unit). "Blocks P5-U1" =
+must be resolved before any P5-U1 schema/code.
+
+B1 — What is being booked?
+  Question: Is a booking for a service, a staff member, a resource,
+    a time slot, or a combination?
+  Repository evidence: No booking model exists. The frozen
+    Reservation books equipment over a window ("ONE Equipment for ONE
+    Customer over a half-open interval"); the commerce Order books
+    nothing temporal. StoreType has no SERVICE value.
+  Why the repository cannot decide: "Booking belongs to Phase 5" is a
+    scoping statement, not a definition; nothing defines the target.
+  Options: (a) service-only (booking = service instance at a time);
+    (b) service+staff; (c) service+staff+resource; (d) resource-only;
+    (e) slot-only.
+  Consequences: (a) simplest schema (one FK), no staff model needed
+    (B16 collapses); (b) requires B16 + per-staff overlap constraints;
+    (c) additionally requires a bookable-resource model (largest
+    schema, most expensive to change later); (d)/(e) make "Service"
+    a mere catalog label and push all semantics elsewhere.
+  Dependencies: drives B2, B4, B16, B22, and the exclusion-constraint
+    target. Cannot be recommended ahead of B2: a booking's target
+    depends on what a service IS.
+  Blocks P5-U1: only the constraint-relevant SUBSET (must not
+    contradict the catalog design). Full resolution blocks P5-U4.
+  Deferrable: partially — full decision rides with the availability
+    cluster; the catalog unit must simply not preclude it.
+  Status: REQUIRES USER DECISION (cluster).
+
+B2 — What is a Service?
+  Question: sellable catalog item (bookable product), scheduled
+    event definition, or resource-consuming operation?
+  Evidence: Product exists but is goods-oriented (variants/SKUs/
+    stock); no service concept anywhere; "Service" in code = NestJS
+    injectables only.
+  Why undecidable: no document, model, permission, or enum value
+    references a bookable service.
+  Options: (a) tenant-scoped catalog entity (like Product but
+    temporal); (b) alias of Product with a flag; (c) an event
+    template that materializes occurrences.
+  Consequences: (a) additive, clean, matches every catalog
+    convention, allows its own lifecycle/RESTRICT later; (b) couples
+    booking to the goods inventory model (variants/stock semantics
+    leak in); (c) pre-commits to an occurrence model before B4.
+  Dependencies: gates B1, B5, B20, B23 and the whole P5-U1 model.
+  Blocks P5-U1: YES (nothing about the model is designable without
+    it).
+  Status: REQUIRES USER DECISION (BLOCKING).
+
+B3 — Booking lifecycle
+  Question: which statuses (create/confirm/cancel/complete/no-show/
+    reschedule/expire) and which transitions are server-controlled?
+  Evidence: two proven lifecycle styles exist — Reservation
+    (RESERVED|ACTIVE|COMPLETED|CANCELLED, guarded transitions,
+    DELETE=soft cancel, terminal-state constraint scoping via the
+    EXCLUDE WHERE clause) and Order (PENDING|PAID|CANCELLED,
+    PAID terminal, financial-history no-delete). Both: status never
+    client-writable.
+  Why undecidable: whether a booking mirrors either style, needs
+    no-show, confirmation, or expiration is pure business policy.
+  Options: minimal (BOOKED|CANCELLED|COMPLETED); reservation-like
+    (+CONFIRMED); full (+NO_SHOW, +EXPIRED, reschedule as atomic
+    cancel+recreate).
+  Consequences: statuses are cheap to ADD (enum + guarded
+    transitions) but the EXCLUDE WHERE clause and reconciliation
+    semantics reference them — removing/renaming after data exists is
+    the expensive direction; cancellation-with-refund (B19) would
+    couple it to frozen payment semantics.
+  Dependencies: depends on B1/B4 (what holds a slot); couples B19.
+  Blocks P5-U1: NO (lifecycle is P5-U4).
+  Deferrable: YES — to P5-U4.
+  Status: SAFE TO DEFER (P5-U4), with the reservation-style
+    guard/terminal/soft-cancel conventions noted as the repository-
+    supported template.
+
+B4 — Availability model
+  Question: fixed slots vs arbitrary start/end windows; who/what
+    defines availability?
+  Evidence: Reservation uses arbitrary half-open [startAt,endAt) UTC
+    windows with two-layer protection; no slot/fixed-grid concept
+    exists anywhere; Store.settings (Json?) is empty of hours.
+  Why undecidable: both models are implementable on frozen
+    conventions; nothing selects one for BOOKING.
+  Options: (a) arbitrary windows (Reservation-style: two-layer
+    app-precheck 409 + DB EXCLUDE); (b) fixed discrete slots (a
+    Slot table + capacity); (c) hybrid.
+  Consequences: (a) reuses the proven pattern 1:1, least new
+    machinery, easiest concurrency story; (b) introduces a slot
+    inventory (capacity races → guarded updateMany) and a slot
+    lifecycle; (c) most code. The EXCLUDE target and index shape
+    differ per option.
+  Dependencies: depends on B1/B5 (duration defines window length);
+    gates B6..B9 (schedules/capacity only exist within a model).
+  Blocks P5-U1: NO.
+  Deferrable: YES — to P5-U3, but B1+B5 must be known by then.
+  Status: SAFE TO DEFER (P5-U3), arbitrary-window evidence noted.
+
+B5 — Service duration representation
+  Evidence: NO Duration field/type anywhere; Reservation derives
+    duration as endAt-startAt and validates start<end.
+  Options: derived-only (booking window implies duration); explicit
+    defaultDuration on Service; per-slot durations.
+  Consequences: derived-only = zero new representation; explicit
+    duration enables auto-window construction (and must be a positive
+    interval — CHECK-style, validated like start<end).
+  Dependencies: depends on B2 (a catalog item can carry a default);
+    feeds B4.
+  Blocks P5-U1: only if pricing/booking-by-duration is approved at
+    the catalog unit.
+  Status: REQUIRES USER DECISION (rides with B23 in the catalog
+    cluster — needed at P5-U1 only if duration-priced).
+
+B6 — Staff schedules
+  Evidence: no staff/schedule model exists; User+Membership is the
+    only staff concept, with no time attributes.
+  Why undecidable: depends entirely on B16 (whether staff are
+    bookable at all) and B4.
+  Options: none articulable before B16.
+  Blocks P5-U1: NO. Deferrable: YES — P5-U3 (if staff bookable).
+  Status: SAFE TO DEFER (P5-U3, conditional on B16).
+
+B7 — Resource schedules
+  Same structure as B6 but for resources; additionally depends on
+  what a "bookable resource" even is (B1(c)). Asset is rental-
+  adjacent and NOT established as the booking base.
+  Status: SAFE TO DEFER (P5-U3, conditional on B1).
+
+B8 — Store opening hours / blackouts / holidays
+  Evidence: none exist; Store.settings Json? is the only legal
+  extension point and is empty by design.
+  Options: (a) no hours in Phase 5 (validate only start<end);
+    (b) hours as structured Store.settings content (schema-free,
+    Json is already in the DB); (c) a first-class model.
+  Consequences: (a) zero cost, bookings may fall outside real hours;
+    (b) no migration, validation via service logic; (c) new model +
+    migration.
+  Blocks P5-U1: NO. Deferrable: YES — P5-U3.
+  Status: SAFE TO DEFER (P5-U3).
+
+B9 — Capacity (1:1 vs group)
+  Evidence: Reservation is strictly 1:1 per equipment (EXCLUDE
+    equality on equipmentId); Inventory's guarded updateMany is the
+    multi-unit precedent.
+  Options: 1:1 (EXCLUDE, Reservation-identical); capacity>1
+    (guarded conditional decrement, Inventory-identical).
+  Consequences: 1:1 keeps the single proven DB-authoritative pattern;
+    capacity adds a counter and changes the constraint story.
+  Dependencies: depends on B1/B4.
+  Blocks P5-U1: NO. Deferrable: YES — P5-U3.
+  Status: SAFE TO DEFER (P5-U3), 1:1 evidence noted.
+
+B10 — Timezone semantics
+  Evidence: the ENTIRE codebase is UTC-only (ISO-8601 UTC instants;
+    the EXCLUDE constraint materializes ranges AT TIME ZONE 'UTC';
+    no IANA/locale concept exists anywhere).
+  Why still a decision: business-local display/booking semantics are
+    a product question the repository has never faced.
+  Options: (a) UTC-only (matches ALL existing code and F9);
+    (b) per-store business timezone.
+  Consequences: (a) zero new machinery, consistent with F9 and the
+    frozen constraint; (b) requires a tz column + validation +
+    conversion layer — a cross-cutting representation change that
+    would be very expensive to retrofit if assumed wrong.
+  Dependencies: none upstream; affects every time field in the new
+    domain.
+  Blocks P5-U1: NO (catalog has no time fields). MUST be resolved
+    before P5-U3 (availability) since the constraint materializes
+    ranges.
+  Status: REQUIRES USER DECISION (before P5-U3; strongly supported:
+    UTC-only per F9). SAFE TO DEFER beyond P5-U1.
+
+B11 — Is Booking store-scoped?
+  Evidence: BOTH patterns exist — tenant-wide (Customer, Order,
+    Reservation — NOT store-scoped) and store-bound (Asset optional
+    storeId; PosDevice PERMANENT store binding; Inventory store
+    pools). The repository genuinely contains both precedents.
+  Why undecidable: nothing says which pattern a booking follows.
+  Options: (a) tenant-wide like Order/Reservation; (b) store-scoped
+    like PosDevice/Inventory pools; (c) optional storeId like
+    Asset (nullable scope).
+  Consequences: (a) simplest — matches the customer/commerce
+    chain a booking most naturally lives beside; (b) enables store
+    isolation of availability but adds scoping to every query +
+    affects the EXCLUDE target (same store only?); (c) nullable
+    scope = most schema-flexible, weakest invariant.
+  Dependencies: with B12..B14 (one coherent ownership choice);
+    affects B22 (constraint target) and B4 (whose availability).
+  Blocks P5-U1: NO (a service catalog can be tenant-scoped now and
+    a store column added additively later IF the catalog is not
+    store-bound — but the OWNER should not defer a strong opinion).
+  Deferrable: YES — to P5-U2/P5-U4, noting additive-migration
+    feasibility for (b) later.
+  Status: SAFE TO DEFER (with the caveat recorded).
+
+B12 — Can a booking span stores?
+  Evidence: no precedent either way (nothing temporal spans stores).
+  Depends on B11; meaningful only under (b).
+  Status: SAFE TO DEFER (rides B11).
+
+B13 — Can staff work across stores?
+  Evidence: no staff-store association exists (Membership is
+    tenant-level).
+  Depends on B16 + B11.
+  Status: SAFE TO DEFER (P5-U2, conditional on B16).
+
+B14 — Can a service belong to multiple stores?
+  Evidence: Product is tenant-wide (no storeId); Inventory pools
+    are per-store. Both precedents exist.
+  Depends on B11/B2.
+  Status: SAFE TO DEFER (P5-U2).
+
+B15 — Guest (customerless) bookings
+  Evidence: Order.customerId is nullable (the frozen "walk-in"
+    commerce rule); Reservation requires a customer. BOTH
+    precedents exist in frozen code.
+  Options: require a customer (Reservation-style RESTRICT);
+    allow optional (Order-style).
+  Consequences: requiring = strongest history invariants; optional =
+    walks in the footsteps of the POS walk-in rule. A later
+    NOT NULL→nullable relaxation is trivial; the reverse is a
+    destructive-ish change.
+  Dependencies: none upstream; affects P5-U4 schema.
+  Blocks P5-U1: NO. Deferrable: YES — P5-U4.
+  Status: SAFE TO DEFER (P5-U4), both frozen precedents cited.
+
+B16 — Staff/Provider model
+  Question: introduce a staff model? Wrap User or standalone?
+  Evidence: no canonical model; User+Membership has no scheduling
+    attributes; the roadmap never mentions staff.
+  Options: (a) no staff in Phase 5 (service-only bookings — B1(a));
+    (b) wrap User (additive Profile-like model); (c) standalone
+    named-entity model.
+  Consequences: (a) collapses B6/B13 and shrinks the whole phase;
+    (b) ties bookability to membership identity; (c) decouples but
+    creates a second people-registry beside User/Customer.
+  Dependencies: downstream of B1 (staff matter only if staff are
+    booked); upstream of B6/B13; part of the constraint target
+    choice (B22).
+  Blocks P5-U1: NO (catalog does not require staff).
+  Deferrable: YES — P5-U2 (or collapses if B1(a)).
+  Status: SAFE TO DEFER (P5-U2, conditional on B1).
+
+B17 — Booking↔commerce relationship
+  Evidence: Order/Payment are frozen (PENDING→PAID|CANCELLED;
+    cash/card/offline semantics fixed); PosSale showed the ADDITIVE
+    provenance-link pattern for connecting a new domain to an Order
+    without touching the state machines.
+  Options: (a) no payment link in Phase 5; (b) additive provenance
+    link (booking→orderId like PosSale); (c) booking IS an Order.
+  Consequences: (a) keeps the phase minimal; (b) the proven
+    additive pattern; (c) couples a temporal entity to a
+    financial one — rejected by the frozen separation precedents.
+  Dependencies: depends on B3/B18/B19.
+  Blocks P5-U1: NO. Deferrable: YES — P5-U5 (conditional unit).
+  Status: SAFE TO DEFER (P5-U5).
+
+B18 — Payment timing
+  Depends on B17. No precedent beyond "cash captured when
+  tendered / card online-only". Deferrable to P5-U5.
+  Status: SAFE TO DEFER (P5-U5, conditional on B17).
+
+B19 — Cancellation refunds
+  Evidence: refunds DO NOT EXIST anywhere in the repository and are
+  repeatedly declared out of scope (Phase 3 §7: "PAID terminal ...
+  refunds/fulfilment => later phases"; Phase 4: no refunds).
+  Options: no refunds in Phase 5 (cancel = status only); introduce
+    refunds (NEW DOMAIN BEHAVIOR touching frozen Payment semantics).
+  Consequences: any refund flow forces changes around the frozen
+    PAID-terminal invariant — the highest-risk commerce decision in
+    the phase.
+  Dependencies: B3/B17.
+  Blocks P5-U1: NO. Deferrable: YES — P5-U5 (and recommended to
+    remain "no refunds" unless explicitly wanted).
+  Status: REQUIRES USER DECISION but SAFE TO DEFER (P5-U5); the
+    no-refund option is the only one not touching frozen state
+    machines.
+
+B20 — Do services consume inventory/products/variants/resources/
+  capacity?
+  Evidence: nothing links services to goods; Product→Inventory is
+  goods-only; Asset is rental-adjacent. No rule exists.
+  Options: no consumption (pure temporal booking); consumption of
+    variants (Order-line-like); capacity consumption.
+  Consequences: consumption couples the temporal domain to the
+    guarded-decrement machinery (proven but additional).
+  Depends on B2. Deferrable: YES — late unit (post-P5-U4), because
+    nothing in the blocking cluster requires it.
+  Status: SAFE TO DEFER (post-P5-U4; default "none" unless
+    approved otherwise).
+
+B21 — New RBAC keys (service:* / booking:*) + role defaults
+  Evidence: no booking/service keys; established conventions —
+    five-key pattern, admin += *_MANAGE, employee scoped, owner
+    semantic-all, catalog additive-only (F8).
+  Why a decision: the exact key SHAPE and employee defaults are
+    product choices (e.g. should employees create bookings?).
+  Options: five-key service:* pattern; minimal read/create/manage.
+  Consequences: mechanical either way (additive catalog rows);
+    wrong defaults are cheap to change later (grants are data).
+  Dependencies: downstream of B2/B3 (what actions exist).
+  Blocks P5-U1: YES (the catalog routes need their keys).
+  Status: REQUIRES USER DECISION (BLOCKING, low-risk), with the
+    five-key/admin-manage/employee-read template as the repository-
+    supported default recommendation.
+
+B22 — Overlap/concurrency enforcement target + layer
+  Evidence: the proven template is Reservation's two-layer
+    protection (app 409 precheck + DB EXCLUDE USING gist on
+    tstzrange WHERE status IN (holding states)); DB-authoritative
+    arbitration is F6.
+  Question: WHAT does the constraint guard — (staff, time)?
+    (service-instance, time)? (resource, time)? (store, time)?
+  Consequences: THE most expensive late change — dropping/recreating
+    a live EXCLUDE constraint on a table with financial/history
+    rows under deploy-only discipline. Must be finalized WITH B1/B4
+    before the Booking migration.
+  Dependencies: downstream of B1/B4/B11/B16; part of P5-U4.
+  Blocks P5-U1: NO (constraint arrives with Booking, P5-U4) — but
+    B1 must not preclude it.
+  Status: REQUIRES USER DECISION at P5-U4 (cluster with B1/B4).
+
+B23 — Service pricing model
+  Evidence: money conventions are frozen (F9: BigInt minor units,
+    ISO-4217 Char(3), JSON strings, server-authoritative Price rows
+    as the catalog precedent — the Product/Price pair).
+  Question: does a service carry a price at all? per-service flat?
+    per-duration? per-staff?
+  Options: (a) no pricing in Phase 5; (b) flat price columns
+    (amountMinor+currency, Price-table-like or inline);
+    (c) duration-priced (needs B5).
+  Consequences: (a) minimal; (b) reuses the frozen money
+    representation 1:1; (c) adds derived-window pricing.
+  Dependencies: with B2/B5; gates B18 later.
+  Blocks P5-U1: YES (whether the Service model has price columns is
+    a P5-U1 schema question).
+  Status: REQUIRES USER DECISION (BLOCKING).
+
+=======================================================================
+3. BLOCKING-CLUSTER ANALYSIS (B1, B2, B3, B4, B11, B16)
+=======================================================================
+The six must resolve as ONE coherent whole. The repository supports
+two coherent end-states and various hybrids; the gate does NOT
+choose:
+
+  COHERENT OPTION A — "SERVICE-CATALOG BOOKING" (smallest):
+    B1(a) book the SERVICE itself at a time; B2(a) Service = a
+    tenant-scoped catalog item; B3 minimal lifecycle; B4(a)
+    arbitrary windows guarded by EXCLUDE ON (serviceId, tstzrange)
+    WHERE holding; B11(a) tenant-wide; B16(a) no staff model.
+    Architecture: Booking = Reservation-shape with serviceId in
+    place of equipmentId + the Product-like catalog behind it.
+    Every piece maps 1:1 onto a frozen, tested pattern.
+
+  COHERENT OPTION B — "APPOINTMENT BOOKING":
+    B1(b) book service+staff; B2(a); B3 reservation-like;
+    B4(a) windows; B11(a or b); B16(b/c) a staff model exists.
+    Architecture: adds the staff model + a second EXCLUDE dimension
+    (or a combined target) — more power, more schema, B6/B13 become
+    real.
+
+  INCOHERENT COMBOS (explicitly rejected by this analysis):
+    - Choosing B4(b) fixed slots while B1(c) books resources
+      (double inventory of time).
+    - Choosing B16 (staff) while B1(a) says staff are never booked
+      (dead schema).
+    - Choosing B11(b) store-scoped bookings while keeping B14
+      multi-store services (ambiguous isolation).
+    - Deciding B3 no-show/expiration before B1 (statuses reference
+      what holds the slot).
+  The dependency order in section 4 prevents these by sequencing.
+
+=======================================================================
+4. DEPENDENCY GRAPH
+=======================================================================
+  B2 (Service definition)
+   ↓ gates everything (no domain exists without it)
+  B1 (what is booked) ←→ B23 (pricing) ←→ B5 (duration)
+   : the catalog cluster — B23/B5 ride with B2 because they are
+     catalog FIELDS; B1's resolution determines what else exists
+   ↓
+  B16 (staff model, conditional on B1)   B11..B14 (ownership scope)
+   ↓                                          ↓
+  B4 (availability model) ←— B10 (timezones, before any constraint)
+   ↓
+  B22 (overlap constraint target + layer) + B9 (capacity)
+   ↓
+  B3 (lifecycle: statuses reference the holding semantics)
+   ↓
+  B15 (guest?)  B17/B18 (commerce link + timing)  B19 (refunds)
+   ↓
+  B20 (inventory consumption — independent, latest)
+  B21 (RBAC keys) — mechanical, needed at each unit's routes
+  B6/B7/B8 — children of B4/B16/B11, resolve inside P5-U3
+
+  Must-decide-together sets:
+    {B2, B23, B5} at P5-U1 (the Service row's columns).
+    {B1, B4, B22, B9} at P5-U3/U4 (the constraint target).
+    {B11..B14, B16, B13} as one ownership choice at P5-U2.
+    {B3, B15} at P5-U4 (lifecycle + customer requirement).
+    {B17, B18, B19} at P5-U5 (or skipped).
+
+  Schema-affecting: B2, B5, B9, B11, B15, B16, B22, B23 (+B4).
+  API-affecting:   B2, B3, B4, B17, B21, B23.
+  Concurrency-affecting: B1, B4, B9, B16, B22 (constraint target,
+    capacity, layer).
+
+=======================================================================
+5. MINIMUM APPROVAL REQUIRED FOR P5-U1
+=======================================================================
+P5-U1 = the SERVICE CATALOG FOUNDATION only (a Product-like
+foundation slice; NO booking, availability, staff, or commerce).
+Under that boundary the decisions the repository genuinely cannot
+make for you are exactly:
+
+  1. B2 — What a Service is (approved definition). The catalog
+     model's identity, uniqueness, and lifecycle hang on it.
+  2. B23 — Service pricing model, including the explicit option
+     "no pricing in P5-U1" (a priceless catalog can gain price
+     columns additively later; the reverse is a data migration).
+  3. B5 — Duration representation, ONLY IF B23 selects duration-
+     related pricing (otherwise defer with B4).
+  4. B21 — The service:* RBAC keys + role defaults for the catalog
+     routes (shape + who may read/create/update/delete/manage).
+  5. B1 — A minimal constraint-relevant acknowledgment: that P5-U1's
+     catalog design must not preclude the B1 outcome (e.g. if
+     services might later be booked per-staff, the catalog must not
+     hard-bind bookings to service-only). FULL B1 resolution is
+     deferred with its cluster.
+
+Everything else is safely deferrable to the units named in the
+matrix. If the owner instead approves the full Option A/B cluster
+up front, P5-U4's schema is fixed earlier and later units get
+cheaper — but it is not REQUIRED for P5-U1.
+
+=======================================================================
+6. PROPOSED P5-U1 SCOPE (NOT APPROVED — fields marked BLOCKED
+   where a business decision is still required)
+=======================================================================
+Objective: the tenant-scoped Service catalog entity + its CRUD/list
+API, RBAC keys, and full test matrix — the U1-Category-style
+smallest standalone slice. No Booking, availability, staff, pricing
+semantics beyond what B23 approves, no commerce links.
+
+Domain model (candidate):
+  Service {
+    id cuid PK
+    tenantId                    (server-derived, F5)
+    name                        @@unique([tenantId, name]) — the
+                                Category/Product uniqueness precedent
+    description String?
+    status                      ENUM — BLOCKED: values require B2
+                                lifecycle acknowledgment; candidate
+    ACTIVE|ARCHIVED mirrors Product/Variant soft-retirement
+    [price columns]             BLOCKED — REQUIRES B23: either
+                                inline (amountMinor BigInt +
+                                currency Char(3), frozen F9) or a
+                                ServicePrice child table (Price
+                                precedent) or ABSENT (no pricing)
+    [defaultDuration]           BLOCKED — REQUIRES B5/B23
+    createdAt / updatedAt
+  }
+  Relationships: tenant CASCADE only at this unit; NO booking/
+    staff/store links yet (all additive later).
+  Ownership: tenant-scoped, registered in TENANT_SCOPED_MODELS.
+  Store ownership: none in P5-U1 — BLOCKED on B11 for later, but
+    the catalog is designed so an optional storeId could be added
+    additively without breaking the catalog itself.
+
+Indexes/constraints: @@unique([tenantId, name]);
+  @@index([tenantId]); @@index([tenantId, createdAt, id]) keyset
+  parity — the universal catalog pattern.
+
+Migration impact: ONE additive handwritten migration at slot
+  20260821170000 (next per F4); CHECK constraints in handwritten
+  SQL if price columns approved (amountMinor >= 0 — Price
+  precedent); NO existing migration touched.
+
+API impact (follows F7): /services GET(paginated)|POST;
+  /services/:id GET|PATCH|DELETE; PATCH not PUT; whitelist DTOs;
+  uniform 404; keyset envelope. RBAC keys per B21 — BLOCKED:
+  exact keys/defaults require B21.
+
+Security boundaries: tenant isolation via the extension (F5);
+  no client tenantId (whitelist 400); uniform 404 IDOR; typed 409
+  for duplicate name (P2002 precedent).
+
+Concurrency boundaries: none beyond unique-name P2002 (catalog
+  only; no temporal races in this unit).
+
+Test strategy: DTO whitelist spec; service unit spec (fail-closed,
+  P2002→409, projections, pagination composition); integration
+  matrix (401/403 RBAC per B21, IDOR cross-tenant 404, tenantId
+  injection 400, pagination envelope + cursor chaining, duplicate
+  name 409, archive semantics per approved status values).
+
+Explicit exclusions: NO Booking, availability, staff, scheduling,
+  store-scoping, customer links, order/payment links, inventory
+  consumption, notification, or offline-sync interaction. NO
+  changes to any frozen code.
+
+=======================================================================
+7. PHASE 4 COMPATIBILITY (confirmed)
+=======================================================================
+P4-U1..U9 remain FROZEN at 7365acf. This gate changed nothing.
+Confirmed untouched: PosOperation, PosOperationItem, the offline
+sync protocol, the offline payment boundary, reconciliation
+semantics, PosFeedEvent, and all POS/Order/Payment state machines.
+No P5 unit may modify them; the only conceivable future exception
+  is a proven, explicitly-approved compatibility fix in a later
+checkpoint. None is currently identified.
+
+=======================================================================
+8. ARCHITECTURE RISKS (highest-risk decisions + the cost of a
+   wrong assumption)
+=======================================================================
+  R1 EXCLUDE TARGET (B22/B1/B4): dropping/re-adding a live
+     exclusion constraint on a history-bearing table under
+     deploy-only discipline = the most expensive refactor in the
+     phase. Mitigation: decide B1+B4+B22 together, before any
+     Booking migration.
+  R2 TIMEZONE (B10): retrofitting business-timezone semantics
+     across every time field + the range materialization = a
+     cross-cutting representation migration. Mitigation: settle
+     (evidence supports UTC-only per F9) BEFORE P5-U3.
+  R3 STAFF MODEL (B16/B1): building staff scheduling that B1 later
+     makes dead schema, or omitting staff that B1 later requires =
+     either dead tables or a new registry bolted into every
+     constraint. Mitigation: resolve B1 before P5-U2/P5-U3.
+  R4 STORE SCOPING (B11..B14): choosing tenant-wide then needing
+     store isolation forces a new column + every-query scoping
+     retrofit; choosing store-scoped then needing cross-store
+     breaks an invariant. Mitigation: decide the ownership cluster
+     as one choice at P5-U2.
+  R5 DURATION/PRICING (B5/B23): duration-priced services need an
+     interval representation that does not exist; picking per-
+     duration pricing after flat data exists forces re-pricing
+     history (violating the snapshot philosophy). Mitigation:
+     decide with B2 at P5-U1.
+  R6 BOOKING↔PAYMENT + REFUNDS (B17..B19): refunds do not exist
+     and PAID is terminal-frozen; assuming refundable cancellation
+     would force touching frozen Payment semantics. Mitigation: no
+     refunds unless explicitly approved; commerce link (if any) via
+     the PosSale additive-provenance pattern only.
+  R7 INVENTORY CONSUMPTION (B20): coupling services to the guarded
+     goods machinery before the booking model stabilizes spreads
+     inventory semantics into the temporal domain. Mitigation:
+     default none; defer to a late unit.
+  R8 DOUBLE-BOOKING (B22/B9): choosing app-layer-only protection
+     would deviate from F6 and repeat the pre-frozen-Reservation
+     history where races were only stopped by the DB constraint.
+     Mitigation: DB-authoritative arbitration per F6.
+  R9 CUSTOMER IDENTITY (B15): making customerId required then
+     relaxing is trivial; the reverse (nullable→required) is a data
+     backfill. Mitigation: default required (Reservation precedent)
+     unless guest bookings are approved at P5-U4.
+  R10 AUTHORIZATION (B21): low schema risk, but granting employees
+     booking-create by default (like the POS pattern) vs staff-only
+     changes the security surface. Mitigation: explicit B21 choice
+     per unit; creating never implies executing (F8/D7).
+
+=======================================================================
+9. RECOMMENDED DECISION ORDER (minimizes rework; the OWNER
+   decides, this gate only sequences)
+=======================================================================
+  STEP 1 (now, for P5-U1): B2 → B23 → (B5 if B23 needs it) → B21
+        → the B1 non-preclusion acknowledgment. This unblocks the
+        catalog slice with zero speculative schema.
+  STEP 2 (before P5-U2): B1 fully → B16 → B11..B14 (as ONE
+        ownership choice). The booking's actors and scope.
+  STEP 3 (before P5-U3): B10 → B4 → B8 → B6/B7 (if staff/
+        resources exist) → B9. The time model.
+  STEP 4 (before P5-U4): B3 → B15 → B22 (finalize the exclusion
+        target; write the constraint once).
+  STEP 5 (P5-U5, conditional): B17 → B18 → B19 (recommend the
+        no-refund option unless explicitly wanted).
+  STEP 6 (late/optional): B20.
+  Each step's decisions are approved together with that unit's
+  plan, per the established CHANGE→VERIFY→DOC→HARD STOP discipline.
+
+=======================================================================
+EXPLICIT STATEMENT
+=======================================================================
+  NO production implementation occurred during this decision gate.
+  No Booking/Service/Calendar/Availability/Scheduling/Staff models,
+  migrations, APIs, RBAC keys, payment changes, or tests were
+  created. The artifacts of this checkpoint are this document and
+  the decision-gate entry in docs/phase-progress.md.

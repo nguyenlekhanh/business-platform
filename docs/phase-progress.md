@@ -4150,3 +4150,30 @@ P5-U1..U8 decomposition.
 
 HARD STOP — Phase 5 discovery complete; no implementation without
 explicit approval of the B1-B23 decisions and the unit plan.
+
+---
+
+## PHASE 5 — BOOKING / SERVICE DECISION GATE COMPLETE (2026-09-01)
+
+STATUS: DECISION GATE COMPLETE (analysis only). See
+docs/phase5_decision_gate.txt (the authoritative artifact). All B1-B23
+were analyzed against the actual repository (evidence re-verified in
+code). Results: 7 architecture-critical interlocking decisions
+(B1/B2/B3/B4/B11/B16/B23 — with B21 mechanical); 10 decisions SAFE TO
+DEFER (each with its named deferral unit); 2 coherent end-state
+combinations identified ("service-catalog booking" — smallest, maps
+1:1 onto frozen Reservation+Product patterns — and "appointment
+booking" with a staff model); 4 incoherent combinations explicitly
+rejected. The most expensive wrong assumption is the EXCLUDE
+constraint target (B1+B4+B22 must be decided together before any
+Booking migration). MINIMUM APPROVAL FOR P5-U1: B2 (service
+definition), B23 (pricing, incl. the no-pricing option), B5 (only if
+duration-priced), B21 (service:* RBAC keys), and a B1 non-preclusion
+acknowledgment. A concrete P5-U1 catalog scope is proposed with all
+undecidable fields marked BLOCKED - REQUIRES DECISION. NO production
+code, schema, migrations, endpoints, RBAC keys, or tests were created;
+Phase 3 + Phase 4 remain frozen. Implementation awaits explicit
+approval of the Step-1 decision set and the P5-U1 plan.
+
+HARD STOP — Phase 5 decision gate complete; no implementation without
+explicit approval.
