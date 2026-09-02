@@ -32,6 +32,8 @@ const TENANT_SCOPED_MODELS = new Set<Prisma.ModelName>([
   'PosOperation',
   'PosOperationItem',
   'PosFeedEvent',
+  // Phase 5 (booking): the service catalog is tenant-owned.
+  'Service',
 ]);
 
 interface MutableOperationArgs {

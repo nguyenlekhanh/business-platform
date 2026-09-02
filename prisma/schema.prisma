@@ -737,6 +737,38 @@ model PosFeedEvent {
   @@index([tenantId, feedSeq])
 }
 
+// ---------- booking: services (Phase 5 P5-U1) ----------
+// Tenant-scoped bookable-service catalog definition ONLY (approved B2):
+// NOT a booking, appointment, occurrence, staff/resource/slot assignment,
+// availability, payment, Order, or performed instance. No pricing (B23
+// deferred), no duration (B5 deferred), no ownership of any future-booking
+// target (B1 non-preclusion: nothing here constrains what Booking books).
+// Status follows the established catalog convention (ProductStatus):
+// soft-retirement via ARCHIVED instead of deletion.
+enum ServiceStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+model Service {
+  id          String        @id @default(cuid())
+  tenantId    String
+  name        String // unique within the tenant
+  description String?
+  status      ServiceStatus @default(DRAFT)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  // Keyset pagination parity with all other tenant-scoped lists.
+  @@index([tenantId, createdAt, id])
+}
+
 // ---------- identity ----------
 model User {
   id           String       @id @default(cuid())
@@ -807,6 +839,7 @@ model Tenant {
   posOperations PosOperation[]
   posOperationItems PosOperationItem[]
   posFeedEvents     PosFeedEvent[]
+  services    Service[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

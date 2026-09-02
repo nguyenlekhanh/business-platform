@@ -4153,27 +4153,134 @@ explicit approval of the B1-B23 decisions and the unit plan.
 
 ---
 
-## PHASE 5 — BOOKING / SERVICE DECISION GATE COMPLETE (2026-09-01)
+## PHASE 5 P5-U1 â€” SERVICE CATALOG FOUNDATION COMPLETE (2026-09-01)
 
-STATUS: DECISION GATE COMPLETE (analysis only). See
-docs/phase5_decision_gate.txt (the authoritative artifact). All B1-B23
-were analyzed against the actual repository (evidence re-verified in
-code). Results: 7 architecture-critical interlocking decisions
-(B1/B2/B3/B4/B11/B16/B23 — with B21 mechanical); 10 decisions SAFE TO
-DEFER (each with its named deferral unit); 2 coherent end-state
-combinations identified ("service-catalog booking" — smallest, maps
-1:1 onto frozen Reservation+Product patterns — and "appointment
-booking" with a staff model); 4 incoherent combinations explicitly
-rejected. The most expensive wrong assumption is the EXCLUDE
-constraint target (B1+B4+B22 must be decided together before any
-Booking migration). MINIMUM APPROVAL FOR P5-U1: B2 (service
-definition), B23 (pricing, incl. the no-pricing option), B5 (only if
-duration-priced), B21 (service:* RBAC keys), and a B1 non-preclusion
-acknowledgment. A concrete P5-U1 catalog scope is proposed with all
-undecidable fields marked BLOCKED - REQUIRES DECISION. NO production
-code, schema, migrations, endpoints, RBAC keys, or tests were created;
-Phase 3 + Phase 4 remain frozen. Implementation awaits explicit
-approval of the Step-1 decision set and the P5-U1 plan.
+STATUS: **P5-U1 = COMPLETE** (implemented, verified, documented). Scope
+delivered EXACTLY per the approved Step-1 decisions: a tenant-scoped Service
+CATALOG DEFINITION (B2) with composite name uniqueness, DRAFT|ACTIVE|
+ARCHIVED status (the established ProductStatus catalog convention), and
+CRUD+list under the frozen API/RBAC conventions â€” with NO pricing (B23
+deferred), NO duration (B5 deferred), NO staff/resource/slot/availability/
+booking fields (B1 non-preclusion honored), NO deletion endpoint, and NO
+changes to any frozen Phase 3/4 behavior. P5-U2 NOT started; awaiting
+explicit user approval.
 
-HARD STOP — Phase 5 decision gate complete; no implementation without
-explicit approval.
+APPROVED DECISIONS IMPLEMENTED (exactly as approved):
+- B2: Service = a tenant-owned catalog entity representing a service that
+  may LATER participate in Booking/commerce. In U1 it is ONLY a catalog
+  definition â€” no booking/appointment/occurrence/assignment/slot/payment/
+  Order/performed-instance semantics exist anywhere in the module.
+- B23: NO pricing. No price/currency/tax/discount/deposit/duration-based/
+  package/variant pricing fields. The DTO whitelist REJECTS injected
+  price/amountMinor/currency fields with 400 (integration-proven).
+- B5: NO duration. No durationMinutes/start/end/slot-length/availability/
+  calendar fields (injection-tested).
+- B21: exactly service:read | service:create | service:manage (no booking:* /
+  schedule:* / availability:* / staff:* / resource:*). Follows the exact
+  catalog conventions: GET -> service:read; POST -> create|manage;
+  PATCH -> manage; admin += all three; employee += service:read; owner
+  semantic-all.
+- B1 (non-preclusion): the model encodes NO ownership of any future booking
+  target (no staffId/resourceId/bookingId/scheduleId/availabilityId). The
+  catalog is tenant-scoped only; every future semantic is additive.
+
+MIGRATION (exactly one, additive, applied via prisma migrate deploy):
+- 20260821170000_add_service
+  CREATE TYPE "ServiceStatus" AS ENUM ('DRAFT','ACTIVE','ARCHIVED');
+  CREATE TABLE "Service" (id TEXT PK cuid, "tenantId" TEXT NOT NULL, name
+  TEXT NOT NULL, description TEXT, status "ServiceStatus" NOT NULL DEFAULT
+  'DRAFT', timestamps); UNIQUE "Service_tenantId_name_key" ON
+  ("tenantId","name"); indexes ("tenantId") and ("tenantId","createdAt","id")
+  for keyset parity; FK tenantId->Tenant CASCADE. No existing objects
+  modified. 20/20 migrations up to date; validate valid.
+
+FILES CHANGED (11):
+- prisma/schema.prisma (ServiceStatus enum + Service model + the
+  Tenant.services backrel â€” all additive)
+- prisma/migrations/20260821170000_add_service/migration.sql (new)
+- src/common/database/prisma/tenant-scoping.extension.ts ('Service' in
+  TENANT_SCOPED_MODELS â€” 21 scoped models now)
+- src/rbac/permission-catalog.ts (SERVICE_READ/CREATE/MANAGE keys,
+  'services' permission category, three definitions, admin += all three,
+  employee += service:read; existing keys untouched)
+- src/service/dto/service.dto.ts (CreateServiceDto name @MaxLength(200) +
+  optional description @MaxLength(2000) + optional status @IsEnum;
+  UpdateServiceDto all-optional; ServiceListQueryDto extends PageQueryDto
+  with a status equality filter â€” the ProductListQueryDto shape. Whitelist
+  rejects tenantId/id/timestamps/bogus AND the deferred-domain fields
+  price/amountMinor/currency/durationMinutes/staffId/resourceId/bookingId/
+  scheduleId.)
+- src/service/service.service.ts (fail-closed requireTenantId; extension-
+  scoped list/get/create/update; P2002 -> 409 'A service with this name
+  already exists in the tenant'; uniform 404 'Service not found'; DRAFT
+  default; PATCH carries the archive flow; NO delete method â€” the omission
+  is deliberate and reported: the approved scope has no deletion
+  semantics, and soft retirement via PATCH status=ARCHIVED is the
+  established convention; a future Booking FK will RESTRICT deletion the
+  way Product does for Category.)
+- src/service/service.controller.ts (/services GET|POST, /services/:id
+  GET|PATCH; PATCH per the Phase 3+ D2 convention on new domains; guard
+  chain JWT(global) -> TenantResolutionGuard -> PermissionsGuard;
+  TenantContextInterceptor; whitelist+transform+forbidNonWhitelisted;
+  service:read on GETs, create|manage on POST, manage-only on PATCH)
+- src/service/service.module.ts (new; imports TenantModule + RbacModule)
+- src/app.module.ts (ServiceModule registration)
+- Tests (new): src/service/dto/service.dto.spec.ts (18), src/service/
+  service.service.spec.ts (9), src/service/service.integration.spec.ts (23)
+
+TEST COVERAGE:
+- 401 on all four routes; 403 outsider; 403 per key (no-read on GET, no-
+  create on POST, no-manage on PATCH); manage-only can create+patch but
+  not read; create-only can create but not read/patch; create does NOT
+  imply manage (proven); owner semantic-all without grants.
+- CRUD happy path: DRAFT default, explicit ACTIVE honored, PATCH
+  name/description/status, ARCHIVED soft retirement, canonical 404.
+- Uniqueness: duplicate name same tenant -> 409 with exactly one row; same
+  name across tenants -> both 201 (composite); rename collision -> 409;
+  CONCURRENT duplicate creation -> [201, 409] and exactly ONE row (the DB
+  UNIQUE arbitrates; no app read-then-create).
+- IDOR/isolation: cross-tenant GET/PATCH -> uniform 404 with the foreign
+  row untouched (both directions); lists isolated per X-Tenant-ID; direct
+  Prisma reads scoped by the ambient context (visible in A, null in B).
+- Validation: missing/empty/too-long name -> 400; invalid status -> 400;
+  ownership injections (tenantId/id/createdAt/updatedAt/bogus) -> 400 on
+  create AND update with zero rows / unchanged row; deferred-domain
+  injections (price/amountMinor/currency/durationMinutes/staffId/
+  resourceId/bookingId/scheduleId) -> 400.
+- Pagination: shared envelope, limit=2 cursor chaining (disjoint pages),
+  status=ACTIVE filter, invalid status -> 400, malformed cursor -> 400.
+
+VERIFICATION RESULTS (exact, actual runs, full gate re-run after lint
+fixes):
+- Focused P5-U1: unit 27/27 (18 DTO + 9 service); integration 23/23.
+- Full unit suite (jest.unit.json): 53 suites, 780/780 passed
+  (was 51/753 post-Phase-4; +2 suites +27 tests exactly).
+- Full integration suite (jest.integration.json): 30 suites, 705/705
+  passed (was 29/682; +1 suite +23 tests exactly; every pre-existing suite
+  green â€” the full P4-U1..U9 stack verified unchanged).
+- npm run format / npx prettier --check: clean.
+- npm run lint: 2 problems â€” BOTH the known pre-existing
+  src/asset/asset.service.spec.ts:203/:221. Zero new lint issues (3
+  gate-time errors fixed before recording results).
+- npm run build (nest build): success.
+- npx prisma validate: valid. npx prisma migrate status: up to date
+  (20 migrations). npx prisma generate: v6.19.3.
+
+PHASE 4 COMPATIBILITY: ZERO changes to any frozen surface. PosOperation/
+PosOperationItem/sync protocol/payment boundary/reconciliation/PosFeedEvent/
+POS state machines untouched (all their suites green in the full run);
+Order/Payment/money/tenant/RBAC semantics untouched; existing 19 migrations
+untouched; no P4 permission modified.
+
+EXPLICIT EXCLUSIONS (confirmed NOT implemented): Booking, appointments,
+scheduled occurrences, staff assignments, resource assignments,
+availability slots, pricing (price/currency/tax/discount/deposit/
+duration-based/package/variant), duration, calendars, scheduling, deletion
+semantics, payment, Order links, inventory consumption, notifications.
+
+NEXT CHECKPOINT: P5-U2 â€” per the decision gate's Step 2 this is the
+ownership/staff unit (B1 fully, B16, B11-B14), contingent on explicit
+approval. NOT started.
+
+HARD STOP â€” P5-U1 complete; do not start P5-U2 without explicit approval.
+

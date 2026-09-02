@@ -1,0 +1,279 @@
+=======================================================================
+ PHASE 5 — BOOKING / SERVICE
+ P5-U1 — SERVICE CATALOG FOUNDATION
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 5, Unit 1 (Service Catalog Foundation)
+Date       : 2026-09-01
+Status     : COMPLETE — implemented, verified, documented, committed,
+             pushed. HARD STOP before P5-U2.
+Starting
+Git commit : 7667b98 ("docs(phase5): add booking service decision gate")
+Governing
+decisions : The user-approved Step-1 decisions B2 (service definition),
+             B23 (NO pricing), B5 (NO duration), B21 (service:read/
+             create/manage), B1 (future-booking non-preclusion) — see
+             docs/phase5_decision_gate.txt section 5.
+
+-----------------------------------------------------------------------
+1. SCOPE
+-----------------------------------------------------------------------
+The tenant-scoped Service CATALOG DEFINITION only (approved B2): the
+entity, its migration, CRUD+list API, RBAC keys, and the full test
+matrix. Explicitly NOT implemented (each verified absent): Booking,
+appointments, scheduled occurrences, staff assignments, resource
+assignments, availability slots, calendars, scheduling, pricing (price/
+currency/tax/discount/deposit/duration-based/package/variant), duration,
+deletion semantics, payment, Order links, inventory consumption,
+notifications.
+
+-----------------------------------------------------------------------
+2. APPROVED DECISIONS AS IMPLEMENTED
+-----------------------------------------------------------------------
+B2  Service = a tenant-owned catalog entity representing a service
+    that may LATER participate in Booking and/or commerce. In U1 it is
+    ONLY a catalog/domain definition — the module contains no booking,
+    appointment, occurrence, staff/resource/slot assignment,
+    availability, payment, Order, or performed-instance semantics.
+B23 NO pricing. The model has no price/currency/tax/discount/deposit
+    fields; the DTO whitelist REJECTS price/amountMinor/currency
+    injections with 400 (integration-proven).
+B5  NO duration. No durationMinutes/start/end/slot-length/availability/
+    calendar fields; durationMinutes injection is rejected 400.
+B21 Exactly service:read | service:create | service:manage (matching
+    the repository's naming convention). GET -> service:read;
+    POST -> create|manage; PATCH -> manage-only. Admin += all three;
+    employee += service:read; owner semantic-all. NO booking:*,
+    schedule:*, availability:*, staff:*, resource:* keys created.
+B1  Non-preclusion: the model encodes NO ownership of any future
+    booking target (no staffId/resourceId/bookingId/scheduleId/
+    availabilityId); every future semantic remains additive.
+
+-----------------------------------------------------------------------
+3. THE EXACT SERVICE MODEL
+-----------------------------------------------------------------------
+prisma/schema.prisma (all additive):
+  enum ServiceStatus { DRAFT  ACTIVE  ARCHIVED }   // the ProductStatus
+                                                   // catalog convention
+  model Service {
+    id          String        @id @default(cuid())
+    tenantId    String                    // server-derived (F5)
+    name        String                    // unique within the tenant
+    description String?
+    status      ServiceStatus @default(DRAFT)
+    createdAt / updatedAt
+    tenant Tenant @relation(..., onDelete: Cascade)
+    @@unique([tenantId, name])
+    @@index([tenantId])
+    @@index([tenantId, createdAt, id])   // keyset parity
+  }
+  Field semantics:
+  - name: the service's display name; unique per tenant (composite
+    constraint — same name allowed in different tenants, no
+    cross-tenant existence leak).
+  - description: optional free-text (MaxLength 2000, the Category/
+    Product convention).
+  - status: DRAFT default on create; PATCH carries the archive flow;
+    ARCHIVED = soft retirement (the established catalog convention —
+    "do not implement lifecycle behavior beyond the established
+    pattern").
+  Case sensitivity: the repository's established uniqueness is exact
+  case-sensitive composite text (Category/Product) — no case-insensitive
+  collation was invented.
+
+-----------------------------------------------------------------------
+4. TENANT ISOLATION
+-----------------------------------------------------------------------
+Service is registered in TENANT_SCOPED_MODELS (src/common/database/
+prisma/tenant-scoping.extension.ts) — every top-level read/write is
+extension-scoped and fails closed without a TenantContext. tenantId is
+server-derived only (requireTenantId at every service method; the
+extension injects it into create/update so a client can never override
+it). No DTO accepts tenantId (whitelist 400 — integration-proven on
+create, update, AND query). Cross-tenant access returns the uniform
+404 (no existence oracle) — proven both directions on GET and PATCH,
+plus the ambient-context direct-Prisma scoping test. No raw SQL.
+
+-----------------------------------------------------------------------
+5. UNIQUENESS + CONCURRENCY
+-----------------------------------------------------------------------
+  - @@unique([tenantId, name]) + the handwritten UNIQUE INDEX in the
+    migration: the DATABASE is the final authority.
+  - No application read-then-create check exists anywhere in the
+    service; the P2002 catch maps the DB violation to 409.
+  - Concurrency integration test: two concurrent POSTs with the same
+    (tenantId, name) -> exactly [201, 409] and exactly ONE row.
+  - Rename collisions hit the same constraint (409).
+
+-----------------------------------------------------------------------
+6. INDEXES
+-----------------------------------------------------------------------
+Only the three demonstrably required by the implemented queries
+(the universal catalog pattern):
+  @@unique([tenantId, name])          — creation uniqueness arbitration
+  @@index([tenantId])                  — extension-scoped single-row ops
+  @@index([tenantId, createdAt, id])   — keyset list scan
+NO speculative indexes for booking/schedule/availability/staff/resource.
+
+-----------------------------------------------------------------------
+7. API SURFACE
+-----------------------------------------------------------------------
+GET   /services            service:read     200 { data, meta.nextCursor }
+GET   /services/:id        service:read     200 ServiceSummary | 404
+POST  /services             create|manage   201 ServiceSummary | 409
+PATCH /services/:id        service:manage   200 ServiceSummary | 404|409
+  - PATCH (not PUT) — the Phase 3+ convention on new domains (D2),
+    verified against the actual controllers.
+  - Guard chain: JWT (global) -> TenantResolutionGuard -> PermissionsGuard;
+    TenantContextInterceptor; whitelist+transform+forbidNonWhitelisted.
+  - NO DELETE route: the approved scope has no deletion semantics; the
+    omission is deliberate and REPORTED (soft retirement via PATCH
+    status=ARCHIVED is the established convention; a future Booking FK
+    will RESTRICT deletion the way Product's does for Category).
+  - No booking/availability/schedule/staff/resource/pricing endpoints.
+
+-----------------------------------------------------------------------
+8. DTO SECURITY
+-----------------------------------------------------------------------
+CreateServiceDto: name (@IsString @IsNotEmpty @MaxLength(200)); optional
+description (@MaxLength(2000)); optional status (@IsEnum(ServiceStatus)).
+UpdateServiceDto: all-optional (empty patch = no-op). ServiceListQueryDto
+extends PageQueryDto + optional status filter (the ProductListQueryDto
+shape). NO tenantId/id/createdAt/updatedAt anywhere; the whitelist+
+forbidNonWhitelisted rejects all of them (400) AND the deferred-domain
+fields (price, amountMinor, currency, durationMinutes, staffId,
+resourceId, bookingId, scheduleId) — integration-proven with zero rows
+created / unchanged rows after rejected patches.
+
+-----------------------------------------------------------------------
+9. RBAC
+-----------------------------------------------------------------------
+Three new keys follow the exact catalog conventions (B21):
+  service:read   -> GET routes
+  service:create -> POST (RequireAnyPermission(create, manage))
+  service:manage -> PATCH (RequireAnyPermission(manage))
+Role defaults: admin += all three; employee += service:read only; owner
+keeps semantic all-permissions. Verified behaviors: unauthenticated ->
+401; missing key -> 403 per action; manage-only can create+patch but
+gets 403 on reads; create-only can create but cannot read/patch (i.e.,
+create does NOT imply manage — the relationship is exactly the guard
+metadata, nothing implicit); owner works without grants.
+
+-----------------------------------------------------------------------
+10. TESTS + FOCUSED RESULTS
+-----------------------------------------------------------------------
+Unit (27/27):
+  - dto spec (18): minimal/partial validation; status enum; max
+    lengths; ownership injections; deferred-domain injections (pricing/
+    duration/booking/staff/resource); list-query status filter + 400s.
+  - service spec (9): fail-closed x4; list filter+keyset composition
+    + envelope; get projection/404; create DRAFT default + tenantId
+    server-derived + P2002->409; update patch shape (no tenantId
+    written) + 404-before-write + rename 409.
+
+Integration (23/23, real AppModule + supertest + real PostgreSQL):
+  401 on all routes; outsider 403; per-key 403s; manage-only; create-
+  only; owner semantic-all; CRUD happy path (DRAFT -> PATCH ->
+  ARCHIVED); explicit ACTIVE; 404; duplicate 409 (exactly one row);
+  same name cross-tenant 201; rename collision 409; CONCURRENT duplicate
+  creation [201,409] one row; cross-tenant GET/PATCH uniform 404 (both
+  directions, foreign row untouched); list isolation; ambient-context
+  Prisma scoping; validation matrix (name/status/ownership injections
+  on create AND update with zero mutation); deferred-domain injections;
+  pagination envelope + cursor chaining + status filter + bad status/
+  cursor 400s.
+
+-----------------------------------------------------------------------
+11. MIGRATION
+-----------------------------------------------------------------------
+ONE additive handwritten migration (deploy-only discipline):
+  20260821170000_add_service
+    - CREATE TYPE ServiceStatus (DRAFT, ACTIVE, ARCHIVED)
+    - CREATE TABLE Service (id, tenantId, name, description?, status
+      DEFAULT 'DRAFT', timestamps)
+    - UNIQUE INDEX Service_tenantId_name_key ON (tenantId, name)
+    - INDEX Service_tenantId_idx; INDEX Service_tenantId_createdAt_id_idx
+    - FK tenantId -> Tenant ON DELETE CASCADE
+  Purposes: the composite unique is the DB uniqueness authority; the
+  (tenantId, createdAt, id) index serves the keyset list; no other
+  constraint is needed at this unit. No existing object modified;
+  no db push/reset; 20 migrations total, up to date; validate valid.
+
+-----------------------------------------------------------------------
+12. FULL REGRESSION RESULTS (ACTUAL RUNS, 2026-09-01)
+-----------------------------------------------------------------------
+  Full unit suite (jest.unit.json): 53 suites, 780/780 passed
+    (post-Phase-4 baseline 51/753; +2 suites, +27 tests)
+  Full integration suite (jest.integration.json): 30 suites, 705/705
+    passed (post-Phase-4 29/682; +1 suite, +23 tests) — FULLY GREEN;
+    every pre-existing suite green (the complete P4-U1..U9 stack
+    unchanged); the known inventory parallel-load flakiness did NOT
+    reproduce in either run.
+  npm run lint: 2 errors — both the KNOWN PRE-EXISTING
+    asset.service.spec.ts:203/:221; zero new issues (3 gate-time
+    errors fixed before recording)
+  npm run build (type-check): success
+  npx prettier --check: all files pass
+  npx prisma validate: valid
+  npx prisma migrate status: up to date (20 migrations)
+
+-----------------------------------------------------------------------
+13. KNOWN ISSUES
+-----------------------------------------------------------------------
+PRE-EXISTING (separate from P5-U1; untouched):
+  - src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+  - Inventory "concurrent increments" flakiness under parallel suite
+    load (did NOT reproduce in this unit's runs; not claimed fixed).
+
+P5-U1 DEFECTS: none.
+
+-----------------------------------------------------------------------
+14. PHASE 4 / PHASE 3 COMPATIBILITY
+-----------------------------------------------------------------------
+ZERO changes to any frozen surface: PosOperation, PosOperationItem,
+the offline sync protocol, the offline payment boundary, reconciliation,
+PosFeedEvent, and all POS/Order/Payment state machines are untouched
+(all their suites green in the full run); money/RBAC/tenant semantics
+untouched; the existing 19 migrations untouched; no P4 permission
+modified.
+
+-----------------------------------------------------------------------
+15. FILES CHANGED
+-----------------------------------------------------------------------
+Created:
+  prisma/migrations/20260821170000_add_service/migration.sql
+  src/service/dto/service.dto.ts / .spec.ts
+  src/service/service.service.ts / .spec.ts
+  src/service/service.controller.ts
+  src/service/service.module.ts
+  src/service/service.integration.spec.ts
+  docs/phase5_p5u1_report.txt (this file)
+Modified:
+  prisma/schema.prisma (Service model + enum + Tenant.services)
+  src/common/database/prisma/tenant-scoping.extension.ts (+1 model)
+  src/rbac/permission-catalog.ts (+3 keys, +1 category, +3
+    definitions, role defaults)
+  src/app.module.ts (ServiceModule)
+  docs/phase-progress.md
+
+-----------------------------------------------------------------------
+16. GIT
+-----------------------------------------------------------------------
+(Recorded after the operations succeeded.)
+
+  Commit message  : feat(booking): implement P5-U1 service catalog
+                    foundation
+  Branch          : main
+  Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+  Push result     : SUCCESS — working tree clean after push
+
+=======================================================================
+FINAL BOUNDARY
+=======================================================================
+  P5-U1 COMPLETE -> DOCUMENTED -> COMMITTED -> PUSHED -> HARD STOP.
+  Confirmed NOT implemented: Booking, scheduling, availability, staff,
+  resources, pricing/payment.
+  DO NOT start P5-U2 (or any later unit). Each requires separate
+  explicit approval.
+=======================================================================
