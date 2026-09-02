@@ -1,0 +1,506 @@
+=======================================================================
+ PHASE 5 — BOOKING / SERVICE
+ DISCOVERY & ARCHITECTURE GATE REPORT (READ-ONLY — NO IMPLEMENTATION)
+=======================================================================
+
+Checkpoint : Phase 5 Discovery / Architecture Gate (pre-implementation)
+Date       : 2026-09-01
+Status     : DISCOVERY COMPLETE — every domain boundary the repository
+             does not already define is listed as an UNRESOLVED business
+             decision in §19. NO production code, schema, migration,
+             tests, or endpoints were created. Implementation requires
+             the project owner's explicit approval of the decisions in
+             §19 and of the unit decomposition in §18.
+Baseline   : Phase 4 COMPLETE and FROZEN (final commit 7365acf; HEAD =
+             origin/main; working tree clean at audit start).
+Governing
+documents : docs/phase-progress.md (source of truth), the Phase 3
+             (docs/phase3_u9_final_report.txt) and Phase 4
+             (docs/phase4_u9_final_verification_report.txt) final
+             reports.
+
+=======================================================================
+0. HEADLINE FINDING — PHASE 5 IS A GREENFIELD DOMAIN WITH STRONG
+   EXISTING INFRASTRUCTURE AND ONE CRITICAL FROZEN-CODE BOUNDARY
+=======================================================================
+1. The repository contains NO Booking, Service, Appointment, Calendar,
+   Availability, Schedule, Slot, Staff, Provider, Practitioner,
+   Technician, or notification models. Searches across prisma/schema,
+   src/, and docs/ found zero matches for these domain concepts
+   (the only hits are the FROZEN rental Reservation module and the
+   generic Asset "resource foundation" comment). StoreType has NO
+   SERVICE value (GENERAL|SHOP|CAFE|RESTAURANT|NAIL_BEAUTY|TRAVEL|
+   LOGISTICS|POS — schema.prisma:28-37).
+2. The ONLY existing time-slot machinery is the FROZEN rental-domain
+   Reservation model (Customer ↔ Equipment over half-open [startAt,
+   endAt) UTC intervals with a btree_gist EXCLUDE no-overlap
+   constraint). phase-progress.md line 30 is explicit: "Booking belongs
+   to Phase 5" — i.e., Phase 5 Booking must be NEW additive code and
+   must NOT expand, refactor, or reuse the frozen reservation domain.
+3. Everything else Phase 5 needs as INFRASTRUCTURE exists and is
+   proven: multi-tenancy (fail-closed extension), RBAC, auth, stores,
+   customers, products/variants/prices, orders/payments, keyset
+   pagination, API conventions, additive handwritten-SQL migration
+   discipline (btree_gist ALREADY INSTALLED — directly reusable for
+   any booking overlap constraint).
+4. NO Phase 5 planning/design documents exist in docs/ (verified:
+   the docs directory contains only the Phase 3 and Phase 4 report
+   families plus this new file). This report is the first Phase 5
+   artifact.
+
+CONSEQUENCE: the architecture can be proposed with high confidence,
+but nearly every BUSINESS rule of the Booking domain (what is booked,
+lifecycle, availability model, cancellation, payment timing, staff,
+capacity, timezones) is UNRESOLVED and requires explicit approval.
+This report deliberately does NOT choose any of them.
+
+=======================================================================
+1. DISCOVERY SCOPE
+=======================================================================
+Read/inspected (read-only; nothing modified):
+  docs/phase-progress.md (complete), docs/phase4_discovery_report.txt,
+  docs/phase3_u9_final_report.txt, docs/phase4_u9_final_verification_
+  report.txt; prisma/schema.prisma (ALL models); the full migration
+  directory (19 migrations incl. 20260821020000's EXCLUDE constraint);
+  app.module.ts; every @Controller (22 routes enumerated); rbac/
+  permission-catalog.ts; tenant-scoping.extension.ts; the reservation/
+  equipment/asset/customer/store modules (for the frozen-rental
+  boundary and the reuse candidates); Store.settings; searches for
+  booking/appointment/service/schedule/calendar/availability/staff/
+  provider/resource/slot/notification/duration/timezone across src/,
+  prisma/, and docs/.
+
+=======================================================================
+2. REPOSITORY FINDINGS — WHAT ACTUALLY EXISTS
+=======================================================================
+EXISTING (verified in code):
+  - Rental Reservation (FROZEN): RESERVED|ACTIVE|COMPLETED|CANCELLED
+    state machine; half-open [startAt,endAt) UTC; two-layer overlap
+    protection (app pre-check 409 'Equipment is already reserved for
+    the selected period' + DB EXCLUDE USING gist on tstzrange WHERE
+    status IN ('RESERVED','ACTIVE')); DELETE = soft cancel; PUT only
+    while RESERVED; customer/equipment RESTRICT; concurrency proven
+    (8 parallel posts -> 1x201+7x409). NOT Phase 5 code — frozen.
+  - Customer: tenant-scoped, NOT store-scoped; @@unique([tenantId,
+    code]); name/code/email?/phone?/notes?/status; shared by BOTH
+    Reservation and Order (tenant-wide customer registry).
+  - Order/OrderItem/Payment: PENDING->PAID|CANCELLED (PAID terminal);
+    Payment PROCESSING->CAPTURED|FAILED; Order.customerId NULLABLE
+    (the documented "walk-in/zero-customer" commerce rule); NO
+    refunds anywhere; money = BigInt minor units, Char(3) currency,
+    strings in JSON.
+  - Store: tenant-scoped, type/status/settings Json? (generic; NO
+    opening-hours or business fields); Asset has an OPTIONAL
+    same-tenant storeId; POS devices are PERMANENTLY store-bound;
+    Inventory has store pools (P4-U3).
+  - User/Membership: the only "staff" concept is User + Membership
+    (user↔tenant↔role). There is NO canonical staff/provider model
+    with scheduling attributes.
+  - Notifications: none (no module, no models).
+  - Time semantics: UTC everywhere; Reservation validates
+    startAt < endAt and stores DateTime; interval semantics are
+    half-open [start,end); NO timezone/locale/IANA concept exists
+    anywhere in the codebase; no duration field (duration is
+    derived end-start).
+  - Migration discipline: additive handwritten SQL, migrate deploy
+    ONLY, btree_gist extension already created idempotently by
+    20260821020000; next slot 20260821170000+; 19 migrations applied.
+
+ABSENT (verified by exhaustive search — this is the Phase 5 gap):
+  Booking, Appointment, Service (as a bookable/sellable entity),
+  ServiceItem, Schedule, Calendar, Availability, Slot, Staff, Provider,
+  Resource (as a bookable entity), Technician, Practitioner,
+  notifications, service:* or booking:* permissions, any
+  opening-hours/capacity/blackout/holiday concept, any duration/
+  timezone abstraction.
+
+=======================================================================
+3. EXISTING DOMAIN INVENTORY (reuse assessment)
+=======================================================================
+Model            | PK    | Tenant | Store | User | Key fields/relations                     | RBAC/scoping today                 | Phase 5 reuse verdict
+-----------------+-------+--------+-------+------+------------------------------------------+------------------------------------+----------------------
+Customer         | uuid  | YES    | NO    | NO   | name, code (unique/tenant), email?, phone?, status; referenced by Reservation (RESTRICT) + Order (RESTRICT, nullable) | customer:* keys; extension-scoped | REUSABLE as the booking customer reference (same tenant-wide registry pattern); guest bookings UNRESOLVED
+User             | cuid  | NO (global identity) | NO | -  | email unique; status; memberships         | JWT subject                        | Reusable as staff/principal IF Phase 5 staff = a member user (DECISION); has no scheduling attributes
+Membership       | cuid  | YES    | NO    | YES  | userId+tenantId unique; roleId; status     | RBAC root                          | The only "staff-of-tenant" concept today
+Store            | cuid  | YES    | self  | NO   | name, code, type, status, settings Json? | store:* keys                       | Candidate booking scope IF store-scoping is approved (DECISION); settings Json is the legal extension point for hours IF ever needed
+Product/Variant/Price | cuid | YES | NO | NO | Product(DRAFT|ACTIVE|ARCHIVED), Variant(ACTIVE|ARCHIVED), Price (variant,currency) unique | product:* keys | A service-catalog COULD mirror this shape, but a SEPARATE Service model is the proposal (products are goods, services are bookable); DECISION
+Order/OrderItem | cuid  | YES    | NO*   | YES  | PENDING|PAID|CANCELLED; customerId? nullable; OrderItem immutable snapshots | order:* keys | *NOT store-scoped (P4-U3 added only the internal inventoryScope). Reuse for booking payment is UNRESOLVED (payment timing/refunds are DECISIONS)
+Payment          | cuid  | YES    | NO    | NO   | PROCESSING|CAPTURED|FAILED; amount derived from Order | payment:* keys | Same as Order — reuse only via explicit approval of booking-payment semantics
+Inventory        | cuid  | YES    | YES (pool) | NO | (storeId?,variantId) partial uniques; guarded updateMany | inventory:* | Services consuming inventory is UNRESOLVED; the pool machinery exists if approved
+PosDevice/Session/Operation/Feed | cuid | YES | YES (permanent) | YES | P4 offline stack | pos:* | FROZEN — Phase 5 must not touch (§20)
+Reservation      | uuid  | YES    | NO    | NO   | FROZEN rental time-slots; EXCLUDE constraint | reservation:* | DO NOT REUSE — frozen rental code; Booking must be a NEW model (the roadmap line "Booking belongs to Phase 5" exists precisely because Reservation is rental)
+Asset            | cuid  | YES    | opt.   | NO   | generic physical resource, type free-form | asset:* | Rental-adjacent and partially frozen; NOT proposed as the bookable-resource base (DECISION on a resource model)
+
+=======================================================================
+4. DOMAIN BOUNDARY DISCOVERY — WHAT "BOOKING"/"SERVICE" MEAN HERE
+=======================================================================
+BOOKING — what is being booked?
+  The repository provides NO definition. The roadmap title is
+  "Phase 5 — Booking / Service" and the single clarifying line is
+  "Booking belongs to Phase 5" (a scoping statement about the frozen
+  rental Reservation, not a domain definition). No document defines
+  whether a booking reserves a service, a staff member, a resource
+  (room/equipment), a time slot, or a combination. CANDIDATE
+  interpretations exist (service-booking, staff-booking,
+  resource-booking, appointment = service+staff+slot) but the
+  repository cannot arbitrate between them.
+  STATUS: UNRESOLVED BUSINESS DECISION (B1).
+
+SERVICE — what is a service?
+  No Service model exists. The word "service" in the codebase refers
+  only to NestJS services (injectables). Nothing establishes whether
+  a service is (a) a sellable catalog item (like Product but
+  bookable), (b) a scheduled/performed event, (c) a resource-consuming
+  operation, or (d) something else. The existing Product family
+  (Product/Variant/Price) is GOODS-oriented (variants+SKUs+stock),
+  and nothing says services reuse it.
+  STATUS: UNRESOLVED BUSINESS DECISION (B2).
+
+=======================================================================
+5. BOOKING LIFECYCLE DISCOVERY
+=======================================================================
+No approved Booking lifecycle exists. The frozen Reservation
+lifecycle (RESERVED→ACTIVE→COMPLETED, CANCELLED) is rental evidence of
+the REPOSITORY'S STYLE (enum state machine, guarded transitions,
+DELETE=soft-cancel precedent) but is explicitly NOT the booking
+lifecycle. Every lifecycle question is unresolved:
+  creation (who may create: customer self-service vs staff-only),
+  confirmation, cancellation, completion, no-show, rescheduling,
+  expiration, payment relationship.
+  STATUS: UNRESOLVED (B3). No statuses are proposed here.
+
+=======================================================================
+6. AVAILABILITY / SCHEDULING DISCOVERY
+=======================================================================
+No availability, schedule, calendar, slot, opening-hours, blackout,
+holiday, or capacity concept exists anywhere in the repository
+(Store.settings Json? is empty by design and holds no hours). Every
+scheduling question is unresolved:
+  fixed slots vs arbitrary start/end; service duration (no Duration
+  field exists anywhere; Reservation derives end-start); staff
+  schedules; resource schedules; store opening hours; blackout
+  periods; holidays; capacity (1:1 vs group/multi-attendee);
+  overlapping bookings.
+  TIMEZONE: the codebase is UTC-only (Reservation: ISO-8601 UTC
+  instants, tstzrange AT TIME ZONE 'UTC'; no IANA/locale concept
+  anywhere). Whether Phase 5 continues UTC-only (like Reservation) or
+  needs business-timezone semantics is an explicit decision (B10).
+  STATUS: UNRESOLVED (B4..B10).
+
+=======================================================================
+7. TENANT / STORE OWNERSHIP DISCOVERY
+=======================================================================
+Unresolved for the new domain (no repository rule establishes these
+for Booking/Service):
+  - Is Service tenant-scoped? (Every tenant-owned model in the
+    repository is tenant-scoped — the overwhelmingly established
+    convention — but this is a proposal, not a booking decision.)
+  - Is Booking store-scoped? EVIDENCE: the tenant-wide pattern
+    (Customer, Order, Reservation are NOT store-scoped) vs the
+    store-bound pattern (Asset.storeId optional, PosDevice permanent
+    store binding, Inventory store pools). Both patterns exist; the
+    repository does not say which applies to bookings.
+  - Can a booking span stores? Can staff work across stores? Can a
+    service belong to multiple stores? All UNRESOLVED (B11..B14).
+  What IS frozen: tenant isolation itself (fail-closed extension,
+    TENANT_SCOPED_MODELS registration, uniform 404) applies to any
+    new model without change.
+
+=======================================================================
+8. CUSTOMER MODEL FINDINGS
+=======================================================================
+  - Tenant-scoped, NOT store-scoped; @@unique([tenantId, code]);
+    generic identity fields; the SAME registry serves Reservation and
+    Order (customer-deleted-with-orders/reservations -> 409 RESTRICT
+    mappings exist — an additive P2003 branch precedent exists for
+    any new child).
+  - A Booking can safely REFERENCE customerId with the same
+    RESTRICT/P2003 pattern (reuse-safe).
+  - Cross-store sharing: customers are tenant-wide today (evidence),
+    so a booking in store A and one in store B can reference the
+    same tenant customer.
+  - GUEST bookings (customerless): UNRESOLVED (B15). The Phase 3/4
+    "walk-in" rule (Order.customerId nullable) is a COMMERCE rule;
+    nothing extends it to bookings.
+
+=======================================================================
+9. STAFF / PROVIDER / RESOURCE MODEL FINDINGS
+=======================================================================
+  - NO canonical staff/provider/resource-for-booking model exists.
+    The only staff concept is User + Membership (identity + RBAC);
+    it carries no scheduling attributes (no working hours, no
+    per-store assignment, no bookable flag).
+  - Asset is the generic "resource foundation" but is rental-
+    adjacent (equipment 1:1 specialization exists) and parts of its
+    service are frozen-adjacent; nothing marks it as bookable.
+  - Whether Phase 5 introduces a Staff/Provider model (and whether
+    it wraps User or is standalone) is UNRESOLVED (B16). This report
+    does NOT propose creating one — that is a domain decision.
+
+=======================================================================
+10. ORDER / PAYMENT RELATIONSHIP FINDINGS
+=======================================================================
+  - Phase 3/4 commerce is fully frozen: Order PENDING→PAID|
+    CANCELLED (PAID terminal), Payment PROCESSING→CAPTURED|FAILED,
+    cash-captured-when-tendered, card online-only, offline sync
+    exactly-once, NO refunds anywhere.
+  - Whether a Booking relates to commerce AT ALL is unresolved:
+    payment required before booking? unpaid bookings allowed? is a
+    booking an Order? does an Order reference a booking? multiple
+    services per booking? refundable cancellation? (B17..B19).
+  - FROZEN CONSTRAINT: whatever Phase 5 decides, it must not modify
+    the Order/Payment state machines or payment semantics (§20);
+    any booking↔order link would be ADDITIVE (like PosSale
+    provenance was for POS).
+
+=======================================================================
+11. INVENTORY RELATIONSHIP FINDINGS
+=======================================================================
+  - Products (goods) consume inventory; nothing establishes that
+    services consume anything. Whether a service consumes no
+    inventory, products/variants, resources, or capacity is
+    UNRESOLVED (B20). Inventory itself stays untouched.
+
+=======================================================================
+12. RBAC FINDINGS
+=======================================================================
+  Current catalog (relevant keys): store:*, member:read/manage,
+  asset:*, equipment:*, customer:*, reservation:*, category:*,
+  product:*, inventory:read/manage, cart:manage, order:*,
+  payment:*, pos:read/create/manage, role:*, settings:*,
+  report:read. There are NO booking:* or service:* keys.
+  - No existing key covers booking/service management. New keys
+    (e.g. service:*, booking:* — exact shape TBD) are REQUIRED by
+    any Phase 5 implementation and are an explicit decision (B21).
+  - Established pattern to reuse: five-key resource pattern or the
+    two-key adjustment-only deviation; admin += *_MANAGE; employee
+    scoped defaults; owner semantic-all; catalog additive-only.
+  - Recording/creating must not imply execution authority (P4-U5 D7
+    precedent applies to any future booking execution boundary).
+
+=======================================================================
+13. API CONVENTIONS (discovered — no endpoints proposed as approved)
+=======================================================================
+  Established conventions any Phase 5 surface MUST follow: plural
+  kebab-case @Controller; guard chain JwtAuthGuard →
+  TenantResolutionGuard → PermissionsGuard (+ TenantContext
+  Interceptor); controller-level ValidationPipe whitelist+transform+
+  forbidNonWhitelisted; PATCH (not PUT) on new domains; uniform 404
+  for foreign ids (no existence oracle); keyset pagination envelope
+  {data, meta.nextCursor}; BigInt money as strings; typed 409
+  business conflicts; idempotent terminal replays where duplicates
+  are possible.
+  A PROPOSED (NOT APPROVED) surface sketch is in §18's unit notes.
+
+=======================================================================
+14. CONCURRENCY / INTEGRITY DISCOVERY (hazards identified, NOT solved)
+=======================================================================
+  Likely Phase 5 hazards and the enforcement layer the REPOSITORY'S
+  PRECEDENTS suggest (final choice = decision):
+  - Double booking / overlapping appointments on the same target
+    (staff or resource or slot): the Reservation EXCLUDE
+    constraint is the proven DB-authoritative pattern (btree_gist
+    already installed; WHERE-status scoping for terminal states);
+    alternatively application-layer pre-check + 409. (B22: which
+    targets and which layer.)
+  - Simultaneous slot/booking creation races: same pattern.
+  - Concurrent cancel + reschedule + book on the same window:
+    guarded state transitions (P4 T2/T3 style) + the exclusion
+    constraint's WHERE clause.
+  - Capacity races (if group bookings approved): guarded
+    conditional updateMany (inventory pattern).
+  - Duplicate booking requests (double-click): client-generated
+    idempotency key (PosOperation pattern) or natural-key uniques
+    — a decision.
+  - Price/duration tampering: server-authoritative pricing
+    (Price/OrderItem snapshot precedent); duration is UNRESOLVED
+    since no duration representation exists.
+
+=======================================================================
+15. MONEY / TIME REPRESENTATION FINDINGS
+=======================================================================
+  Money: BigInt minor units → BIGINT; ISO-4217 Char(3); JSON as
+  strings; exact integer arithmetic; snapshots freeze history. Any
+  service pricing MUST reuse this (no second representation).
+  Time: Prisma DateTime (Postgres timestamp(3)) as UTC instants;
+  half-open [start,end) intervals are the established window
+  convention; start<end validated at the service layer; NO
+  timezone/locale/IANA concept exists; no Duration type exists.
+  Whether booking continues UTC-only (evidence-supported) or needs
+  business timezones is an explicit decision (B10).
+
+=======================================================================
+16. MIGRATION STRATEGY FINDINGS
+=======================================================================
+  Phase 5 will require NEW models (the domain is absent), i.e. new
+  additive handwritten-SQL migrations continuing from slot
+  20260821170000 upward, deploy-only discipline (prisma migrate
+  deploy; never dev/db push/reset; never modify the 19 existing
+  migrations). btree_gist is already installed (any overlap
+  constraint is directly implementable). New models register in
+  TENANT_SCOPED_MODELS (additive, established two-line change).
+  NO migration was created during this discovery.
+
+=======================================================================
+17. SECURITY THREAT MODEL (Phase 5-specific, boundaries mapped to
+    existing enforcement points)
+=======================================================================
+  - tenantId injection → impossible by shape (whitelist 400; never a
+    body field) — extension fail-closed. ENFORCEABLE TODAY.
+  - storeId/customerId/staff(or provider)/service/booking-id
+    injection into provenance → same whitelist + server-derived
+    provenance from authenticated context (P4-U4 pattern).
+    ENFORCEABLE via established patterns; final shapes depend on
+    decisions.
+  - Booking IDOR / cross-tenant reads → uniform 404 via extension
+    scoping (P4-U8 full-surface-replay test pattern reusable).
+  - Cross-store access → depends on the store-scoping decision
+    (B11); the Inventory/PosDevice store-scoping machinery is the
+    precedent IF store-scoped.
+  - Unauthorized cancel/reschedule → RBAC keys + guarded state
+    transitions (P4-U5/U7 pattern) + ownership checks (session/
+    cashier binding precedent).
+  - Price tampering → server-authoritative Price rows (T1/validate
+    Intent precedent); duration tampering → UNRESOLVED with duration
+    itself.
+  - Schedule/resource tampering → RBAC + tenant scoping on any
+    schedule model (if approved).
+
+=======================================================================
+18. PROPOSED PHASE 5 UNIT DECOMPOSITION (CANDIDATE ONLY — NOT
+    APPROVED; each unit blocked on the decisions it carries)
+=======================================================================
+  Proposed strictly from repository evidence and the Phase 3/4
+  checkpoint discipline (CHANGE→VERIFY→DOC→HARD STOP per unit):
+  P5-U1 SERVICE CATALOG FOUNDATION — objective: the Service model
+    (tenant-scoped; pricing in BigInt minor units IF pricing is
+    approved; bookable definition; PATCH verbs; keyset list).
+    Depends: B2 (service definition), B1 partially, pricing
+    decision. Schema: +Service (+price fields?) migration.
+    API: /services CRUD+list. Security: service:* RBAC keys (B21),
+    tenant scoping. Tests: DTO/service unit + RBAC/IDOR/pagination
+    integration. UNRESOLVED carried: B2, B21, pricing.
+  P5-U2 STAFF/PROVIDER + STORE SCOPE (IF APPROVED) — objective: the
+    bookable-actor model (staff wrapping User or standalone) and the
+    booking ownership scope (store-scoped or tenant-wide).
+    Depends: B16, B11..B14. Carried decisions resolve here or the
+    unit is skipped.
+  P5-U3 AVAILABILITY / SCHEDULING — objective: the availability
+    model (slots vs intervals; schedules; capacity; hours) with
+    timezone decision. Depends: B4..B10, B16.
+  P5-U4 BOOKING LIFECYCLE FOUNDATION — objective: the Booking model
+    + approved state machine + overlap protection (EXCLUDE candidate)
+    + cancel/reschedule/no-show semantics. Depends: B1, B3, B22.
+  P5-U5 COMMERCE INTEGRATION (IF APPROVED) — objective: additive
+    booking↔order/payment link with payment timing + refund policy
+    (refund = currently NONEXISTENT and would be new domain
+    behavior requiring explicit approval). Depends: B17..B19.
+  P5-U6 CONCURRENCY / CONFLICT + REPORTING — objective: the race
+    matrix (double-book, capacity, cancel-vs-book), deterministic
+    conflicts, read-only reconciliation reports (P4-U7 pattern).
+  P5-U7 CROSS-DOMAIN / SECURITY VERIFICATION — the consolidated
+    matrix (P4-U8 pattern): ownership chains, full-surface
+    cross-tenant replay, IDOR, injection.
+  P5-U8 FINAL PHASE 5 VERIFICATION — audit + full regression +
+    docs closure + HARD STOP (P4-U9 pattern).
+  NOTE: U2 and U5 are conditional units; if their decisions resolve
+  differently the sequence compresses. NO implementation began.
+
+=======================================================================
+19. FROZEN vs UNRESOLVED DECISIONS
+=======================================================================
+FROZEN / EXISTING (proven from code+docs — Phase 5 MUST comply):
+  F1  Phase 4 frozen: PosOperation/offline sync/payment boundary/
+      reconciliation/PosFeedEvent/POS state machines untouched.
+  F2  Phase 3 frozen: Order/Payment state machines, money = BigInt
+      minor units + ISO-4217 + JSON strings, tenant isolation,
+      RBAC semantics, Cart semantics, OrderItem snapshots.
+  F3  Rental code FROZEN: src/reservation/, src/equipment/, rental
+      aspects of customer/asset, migration 20260821020000's EXCLUDE
+      constraint — Booking must be NEW additive code, not a
+      reservation expansion.
+  F4  Migration discipline: additive handwritten SQL only, migrate
+      deploy only, never modify the 19 existing migrations, btree_
+      gist available, next slot 20260821170000+.
+  F5  Tenant isolation: every new tenant-owned model registers in
+      TENANT_SCOPED_MODELS; tenantId server-derived; fail-closed;
+      uniform 404; no raw SQL over tenant data.
+  F6  Concurrency philosophy: the DATABASE arbitrates shared-
+      resource races (EXCLUDE constraint / guarded updateMany);
+      no read-modify-write, no application-memory locks, no sleeps.
+  F7  API conventions: guard chain, whitelist DTOs (400), PATCH on
+      new domains, keyset pagination envelope, typed 409s, uniform
+      404, idempotent terminal replays.
+  F8  RBAC conventions: catalog additive-only; admin += *_MANAGE;
+      employee scoped; owner semantic-all; creating X never grants
+      executing X (D7 precedent).
+  F9  Money/time representation: BigInt minor units; UTC instants;
+      half-open [start,end) is the established window convention.
+  F10 Customer is tenant-scoped (not store-scoped) and shared
+      across the tenant's stores today; booking may reference it
+      with the RESTRICT/P2003->409 pattern.
+
+UNRESOLVED / REQUIRES EXPLICIT APPROVAL (nothing inferred):
+  B1  What is booked (service / staff / resource / slot / combo).
+  B2  Service definition (sellable catalog item? scheduled event?
+      resource-consuming operation?).
+  B3  Booking lifecycle statuses (creation/confirmation/cancellation/
+      completion/no-show/rescheduling/expiration).
+  B4  Availability model (fixed slots vs arbitrary start/end).
+  B5  Service duration representation (none exists today).
+  B6  Staff schedules (exist? shape?).
+  B7  Resource schedules (exist? what is a bookable resource?).
+  B8  Store opening hours / blackout periods / holidays (none exist).
+  B9  Capacity (1:1 bookings vs group/multi-attendee).
+  B10 Timezone semantics (UTC-only like Reservation vs business
+      timezones — no tz concept exists today).
+  B11 Is Booking store-scoped or tenant-wide?
+  B12 Can a booking span stores?
+  B13 Can staff work across stores?
+  B14 Can a service belong to multiple stores?
+  B15 Guest (customerless) bookings allowed?
+  B16 Staff/Provider model: introduce one? Wrap User or standalone?
+  B17 Booking↔commerce relationship (is payment required? unpaid
+      bookings allowed? is a booking an Order; does Order reference
+      a Booking; multiple services per booking?).
+  B18 Payment timing for bookings (before/at/after).
+  B19 Cancellation refunds (refunds do NOT exist anywhere today —
+      introducing them is new domain behavior).
+  B20 Do services consume inventory/products/variants/resources/
+      capacity?
+  B21 New RBAC keys (service:* / booking:* shapes + role defaults).
+  B22 Overlap/concurrency enforcement targets + layer (DB EXCLUDE
+      like Reservation vs app-layer; which target the constraint
+      guards).
+  (B23) Service pricing model (per service? per duration? per
+      staff?) — pricing fields exist in no service form today.
+
+=======================================================================
+20. PHASE 4 / PHASE 3 COMPATIBILITY (verified, untouched)
+=======================================================================
+  This discovery modified NO production code, NO schema, NO
+  migration, NO tests, NO endpoints. Phase 4 (PosOperation, sync
+  protocol, payment boundary, reconciliation, PosFeedEvent, POS
+  state machines) and Phase 3 (Order/Payment/money/tenant/RBAC)
+  remain exactly as verified at 7365acf. The frozen rental
+  reservation domain was inspected read-only. Any future Phase 5
+  unit must preserve §19's frozen list.
+
+=======================================================================
+21. RECOMMENDED NEXT CHECKPOINT
+=======================================================================
+  Decision gate with the project owner: resolve B1–B23 (§19) — at
+  minimum the blocking cluster B1/B2/B3/B4/B11/B16 — then approve a
+  P5-U1 plan derived from §18. The recommended FIRST unit is the
+  SERVICE CATALOG FOUNDATION (smallest standalone slice, exactly the
+  shape U1-Category was for Phase 3), but it is blocked until B2
+  (service definition), pricing, and B21 (RBAC keys) are approved.
+
+=======================================================================
+EXPLICIT STATEMENT
+=======================================================================
+  NO production implementation was performed during this discovery.
+  No Booking/Service/Calendar/Availability/Scheduling/Staff/Resource
+  code, payment changes, new RBAC, migrations, or API endpoints were
+  created. The only artifacts are this report and the discovery
+  checkpoint entry in docs/phase-progress.md.

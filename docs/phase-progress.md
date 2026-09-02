@@ -4124,3 +4124,29 @@ without separate explicit approval.
 
 HARD STOP â€” Phase 4 â€” POS + Offline Sync COMPLETE via P4-U9.
 
+
+---
+
+## PHASE 5 — BOOKING / SERVICE DISCOVERY GATE COMPLETE (2026-09-01)
+
+STATUS: DISCOVERY COMPLETE (read-only). See docs/phase5_discovery_report.txt
+(the complete, authoritative Phase 5 discovery artifact). Headline findings:
+(1) Booking/Service is a GREENFIELD domain — no Booking, Service,
+Appointment, Calendar, Availability, Schedule, Slot, Staff, Provider,
+Resource, or notification concepts exist anywhere in the repository;
+(2) the ONLY time-slot machinery is the FROZEN rental Reservation domain,
+and the roadmap line "Booking belongs to Phase 5" mandates NEW additive
+code, not reservation expansion; (3) all platform infrastructure
+(multi-tenancy, RBAC, auth, customers, stores, commerce, pagination, API
+conventions, additive handwritten-SQL migrations, btree_gist for overlap
+constraints) exists and is reusable; (4) virtually every Booking business
+rule (what is booked, service definition, lifecycle, availability model,
+staff, capacity, timezones, payment timing, refunds, guest bookings) is
+UNRESOLVED and enumerated as decisions B1-B23 in the report's section 19.
+NO production code, schema, migrations, tests, or endpoints were created;
+Phase 3 + Phase 4 remain frozen at 7365acf. Implementation requires
+explicit approval of the decision list and the proposed (NOT approved)
+P5-U1..U8 decomposition.
+
+HARD STOP — Phase 5 discovery complete; no implementation without
+explicit approval of the B1-B23 decisions and the unit plan.
