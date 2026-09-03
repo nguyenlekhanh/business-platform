@@ -145,14 +145,15 @@ model Customer {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant   Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reservations Reservation[]
+  orders       Order[]
+  bookings     Booking[]
 
   @@unique([tenantId, code])
   @@index([tenantId])
   // Phase 2J keyset pagination (see Asset).
   @@index([tenantId, createdAt, id])
-  reservations Reservation[]
-  orders       Order[]
 }
 
 // ---------- reservations (time-bound holds on rentable equipment) ----------
@@ -761,12 +762,52 @@ model Service {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant   Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  bookings Booking[]
 
   @@unique([tenantId, name])
   @@index([tenantId])
   // Keyset pagination parity with all other tenant-scoped lists.
   @@index([tenantId, createdAt, id])
+}
+
+// ---------- booking: bookings (Phase 5 P5-U4) ----------
+// Tenant-scoped service booking lifecycle (Architecture A: Service-Catalog
+// Booking). Booking = Service + time interval. No staff, no resource.
+// Overlap protection via EXCLUDE on (serviceId, tstzrange) WHERE holding.
+// Status follows the frozen Reservation lifecycle convention (RESERVED -> ACTIVE
+// -> COMPLETED, CANCELLED) adapted for service bookings: BOOKED -> CONFIRMED ->
+// ACTIVE -> COMPLETED, with CANCELLED and NO_SHOW terminals.
+enum BookingStatus {
+  BOOKED
+  CONFIRMED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+model Booking {
+  id          String        @id @default(cuid())
+  tenantId    String
+  serviceId   String
+  customerId  String?
+  startAt     DateTime
+  endAt       DateTime
+  status      BookingStatus @default(BOOKED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  service  Service  @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt, id])
+  @@index([tenantId, serviceId, startAt, id])
+  @@index([serviceId])
+  @@index([customerId])
 }
 
 // ---------- identity ----------
@@ -838,8 +879,9 @@ model Tenant {
   posSales    PosSale[]
   posOperations PosOperation[]
   posOperationItems PosOperationItem[]
-  posFeedEvents     PosFeedEvent[]
-  services    Service[]
+posFeedEvents     PosFeedEvent[]
+  services          Service[]
+  bookings          Booking[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

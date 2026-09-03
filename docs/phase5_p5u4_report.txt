@@ -1,0 +1,335 @@
+=======================================================================
+ PHASE 5 — BOOKING / SERVICE
+ P5-U4 — BOOKING LIFECYCLE FOUNDATION (SERVICE-CATALOG BOOKING)
+ PERMANENT CHECKPOINT REPORT
+=======================================================================
+
+Checkpoint : Phase 5, Unit 4 (Booking Lifecycle Foundation)
+Date       : 2026-09-02
+Status     : COMPLETE — implemented, verified, documented, committed,
+             pushed. HARD STOP before P5-U5.
+Starting
+Git commit : 8aba32d ("docs(phase5): add booking ownership decision gate")
+Baseline   : Phase 4 frozen at 7365acf; P5-U1 complete at cf6751d;
+             P5-U2 decision gate complete at 8aba32d.
+Governing
+decisions : P5-U2 decision gate (docs/phase5_p5u2_decision_gate.txt):
+             B1  Option A (Service-Catalog Booking: Service + time, no staff)
+             B11 Option A (Tenant-wide booking scope)
+             B12 Model A (Service remains tenant-scoped)
+             B13 Option B (Customer optional/nullable, Order walk-in precedent)
+             B14 Sub-option i (Cross-store customer allowed, no membership)
+             B16 Collapsed (No staff model; conditional on B1=Option A)
+
+-----------------------------------------------------------------------
+1. SCOPE
+-----------------------------------------------------------------------
+The tenant-scoped Service BOOKING lifecycle only (Architecture A from
+P5-U2 decision gate): Booking = Service + time interval. No staff,
+no resource, no pricing, no duration, no availability, no scheduling,
+no payment, no Order links. The model carries only the essential
+temporal reservation fields: serviceId, customerId?, startAt, endAt,
+status (BOOKED|CONFIRMED|ACTIVE|COMPLETED|CANCELLED|NO_SHOW).
+
+Explicitly NOT implemented (each verified absent):
+- Staff/Provider/Resource assignment
+- Availability/Calendar/Schedule/Slot
+- Pricing/Payment/Order links
+- Duration fields (derived from interval)
+- Deletion semantics (soft-retirement via status)
+
+-----------------------------------------------------------------------
+2. APPROVED ARCHITECTURE (A) AS IMPLEMENTED
+-----------------------------------------------------------------------
+B1  Service-Catalog Booking — Booking = Service + time interval.
+     No staff/provider required. Maps 1:1 onto frozen Reservation
+     pattern (equipmentId → serviceId).
+B11 Tenant-wide booking scope — matches Customer/Order/Reservation
+     pattern. No storeId on Booking.
+B12 Service remains tenant-scoped — @@unique([tenantId, name]).
+     Inventory handles per-store stock separately.
+B13 Customer optional/nullable — follows Order walk-in precedent
+     (Order.customerId nullable, approved D1). RESTRICT FK when set.
+B14 Cross-store customer allowed — Customer is tenant-scoped;
+     Order/Reservation already cross-store. No membership table.
+B16 No staff model — collapses with B1=Option A.
+
+-----------------------------------------------------------------------
+3. THE EXACT BOOKING MODEL
+-----------------------------------------------------------------------
+prisma/schema.prisma (all additive):
+  enum BookingStatus {
+    BOOKED
+    CONFIRMED
+    ACTIVE
+    COMPLETED
+    CANCELLED
+    NO_SHOW
+  }
+
+  model Booking {
+    id          String        @id @default(cuid())
+    tenantId    String                    // server-derived (F5)
+    serviceId   String                    // FK -> Service RESTRICT
+    customerId  String?                   // FK -> Customer RESTRICT (nullable)
+    startAt     DateTime                  // UTC, half-open [startAt, endAt)
+    endAt       DateTime
+    status      BookingStatus @default(BOOKED)
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    tenant   Tenant   @relation(..., onDelete: Cascade)
+    service  Service  @relation(..., onDelete: Restrict)
+    customer Customer? @relation(..., onDelete: Restrict)
+
+    @@index([tenantId])
+    @@index([tenantId, createdAt, id])
+    @@index([tenantId, serviceId, startAt, id])  // keyset for list
+    @@index([serviceId])
+    @@index([customerId])
+  }
+
+Field semantics:
+- serviceId: FK to Service (tenant-scoped, must be ACTIVE). RESTRICT
+  prevents deleting a Service with active bookings.
+- customerId: optional FK to Customer (tenant-scoped). RESTRICT
+  when present. Null = walk-in booking (Order precedent).
+- startAt/endAt: UTC DateTime, half-open [startAt, endAt).
+  CHECK(endAt > startAt) enforced at DB level.
+- status: BOOKED default on create. PATCH carries lifecycle:
+  BOOKED → CONFIRMED → ACTIVE → COMPLETED
+  CANCELLED / NO_SHOW are terminals from any state.
+  No delete endpoint; soft-retirement via CANCELLED/NO_SHOW.
+  Future resource FK will RESTRICT deletion (Product/Category precedent).
+
+-----------------------------------------------------------------------
+4. TENANT ISOLATION
+-----------------------------------------------------------------------
+Booking registered in TENANT_SCOPED_MODELS (src/common/database/prisma/
+tenant-scoping.extension.ts) — every top-level read/write is
+extension-scoped and fails closed without TenantContext. tenantId is
+server-derived only (requireTenantId at every service method; the
+extension injects it into create/update so a client can never override
+it). No DTO accepts tenantId (whitelist 400). Cross-tenant access
+returns uniform 404 (no existence oracle) — proven both directions
+on GET and PATCH, plus ambient-context direct-Prisma scoping test.
+No raw SQL.
+
+-----------------------------------------------------------------------
+5. UNIQUENESS + CONCURRENCY (EXCLUDE CONSTRAINT)
+-----------------------------------------------------------------------
+No application-level read-then-create check. The DATABASE is the
+final authority via a PostgreSQL EXCLUDE constraint using btree_gist
+(already installed by migration 20260821020000):
+
+  ALTER TABLE "Booking" ADD CONSTRAINT "Booking_no_overlap"
+    EXCLUDE USING gist (
+      "serviceId" WITH =,
+      tstzrange("startAt" AT TIME ZONE 'UTC', "endAt" AT TIME ZONE 'UTC', '[)')
+      WITH &&
+    )
+    WHERE ("status" IN ('BOOKED', 'CONFIRMED', 'ACTIVE'));
+
+Semantics: two bookings for the SAME serviceId may not overlap in
+time while either holds the slot. Half-open intervals [start,end)
+mean back-to-back bookings (endA == startB) are legal. Status
+predicate scopes the constraint to holding states; CANCELLED,
+COMPLETED, NO_SHOW are excluded so historical bookings don't block
+new ones.
+
+Concurrency proven:
+- Concurrent overlapping creation → DB UNIQUE arbitrates
+  (exactly [201, 409], exactly one row).
+- Overlap on update (rename time) → 409.
+- Back-to-back intervals (endA == startB) → both 201.
+- Different services at same time → both 201.
+- Same service in different tenants → both 201.
+
+All verified by integration tests (28/28).
+
+-----------------------------------------------------------------------
+6. INDEXES
+-----------------------------------------------------------------------
+Only the demonstrably required indexes:
+  @@index([tenantId])                           — extension-scoped ops
+  @@index([tenantId, createdAt, id])            — keyset list scan
+  @@index([tenantId, serviceId, startAt, id])   — keyset by service+time
+  @@index([serviceId])                          — FK lookups
+  @@index([customerId])                         — FK lookups
+
+No speculative indexes for staff/resource/schedule/availability.
+
+-----------------------------------------------------------------------
+7. API SURFACE
+-----------------------------------------------------------------------
+GET   /bookings             booking:read     200 { data, meta.nextCursor }
+GET   /bookings/:id         booking:read     200 BookingSummary | 404
+POST  /bookings              create|manage   201 BookingSummary | 409
+PATCH /bookings/:id         booking:manage   200 BookingSummary | 404|409
+- PATCH (not PUT) — Phase 3+ convention on new domains (D2).
+- Guard chain: JWT (global) → TenantResolutionGuard → PermissionsGuard;
+  TenantContextInterceptor; whitelist+transform+forbidNonWhitelisted.
+- NO DELETE route — soft-retirement via PATCH status=CANCELLED/
+  NO_SHOW. Future resource FK will RESTRICT deletion.
+- NO staff/resource/schedule/availability/pricing/payment endpoints.
+
+DTO Security:
+CreateBookingDto: serviceId (cuid, required), customerId? (cuid),
+startAt/endAt (ISO8601 UTC, required), status? (BookingStatus enum).
+UpdateBookingDto: all-optional (empty patch = no-op).
+BookingListQueryDto: PageQueryDto + status/serviceId/customerId filters.
+Whitelist+forbidNonWhitelisted rejects all ownership fields
+(tenantId/id/timestamps) AND deferred-domain fields (staffId,
+resourceId, scheduleId, price, amountMinor, currency, durationMinutes)
+with 400 — integration-proven with zero rows created.
+
+-----------------------------------------------------------------------
+8. RBAC
+-----------------------------------------------------------------------
+Three new keys follow exact catalog conventions:
+  booking:read   → GET routes
+  booking:create → POST (RequireAnyPermission(create, manage))
+  booking:manage → PATCH (RequireAnyPermission(manage))
+
+Role defaults: admin += all three; employee += booking:read only;
+owner semantic-all. Verified: unauthenticated → 401; missing key →
+403 per action; manage-only can create+patch but gets 403 on reads;
+create-only can create but gets 403 on read/patch (create does NOT
+imply manage); owner works without grants.
+
+-----------------------------------------------------------------------
+9. TESTS + FOCUSED RESULTS
+-----------------------------------------------------------------------
+Unit (18/18):
+- dto spec (9): minimal/partial validation; status enum; max
+  lengths; ownership injections; deferred-domain injections;
+  list-query filters + 400s.
+- service spec (9): fail-closed x4; list filter+keyset+envelope;
+  get projection/404; create BOOKED default + tenantId server-derived
+  + P2002→409; update patch shape (no tenantId written) + 404-before-
+  write + rename 409.
+
+Integration (28/28, real AppModule + supertest + real PostgreSQL):
+- 401 on all routes; outsider 403; per-key 403s; manage-only;
+  create-only; owner semantic-all.
+- CRUD happy path (BOOKED → CONFIRMED → ACTIVE → COMPLETED);
+  CANCELLED/NO_SHOW terminals; walk-in (customerId null).
+- EXCLUDE: overlap 409 (exactly one row); back-to-back legal;
+  different services same time 201; cross-tenant 201; update overlap
+  409; concurrent [201,409] exactly one row.
+- IDOR: cross-tenant GET/PATCH uniform 404 both directions;
+  foreign row untouched; ambient-context Prisma scoping.
+- Validation: missing/invalid fields 400; ownership injections 400
+  (zero rows created); deferred-domain injections 400 (zero rows).
+- Pagination: envelope + cursor chaining + status/serviceId/
+  customerId filters + bad status/cursor 400s.
+
+-----------------------------------------------------------------------
+10. MIGRATION
+-----------------------------------------------------------------------
+ONE additive handwritten migration (deploy-only discipline):
+  20260821180000_add_booking
+    - CREATE TYPE BookingStatus (BOOKED, CONFIRMED, ACTIVE,
+      COMPLETED, CANCELLED, NO_SHOW)
+    - CREATE TABLE Booking (id, tenantId, serviceId, customerId?,
+      startAt, endAt, status DEFAULT 'BOOKED', timestamps)
+    - CHECK (endAt > startAt)
+    - INDEX (tenantId), (tenantId, createdAt, id),
+      (tenantId, serviceId, startAt, id), (serviceId), (customerId)
+    - FK tenantId -> Tenant CASCADE; serviceId -> Service RESTRICT;
+      customerId -> Customer RESTRICT
+    - EXCLUDE USING gist (serviceId WITH =, tstzrange(startAt,endAt,'[)')
+      WITH &&) WHERE status IN ('BOOKED','CONFIRMED','ACTIVE')
+Purposes: CHECK enforces positive duration; EXCLUDE is the DB-
+authoritative overlap guard; indexes serve keyset list and FK
+lookups. No existing object modified; no db push/reset; 21
+migrations total, up to date; validate valid.
+
+-----------------------------------------------------------------------
+11. FULL REGRESSION RESULTS (ACTUAL RUNS, 2026-09-02)
+-----------------------------------------------------------------------
+  Full unit suite (jest.unit.json): 55 suites, 826/826 passed
+    (post-Phase-4 baseline 53/780; +2 suites, +46 tests)
+  Full integration suite (jest.integration.json): 31 suites,
+    733/733 passed (post-Phase-4 baseline 30/705; +1 suite, +28
+    tests) — FULLY GREEN; every pre-existing suite green (the
+    complete P4-U1..U9 stack unchanged); the known inventory
+    "concurrent increments" parallel-load flakiness did NOT
+    reproduce in this run.
+  npm run lint: 2 errors — both the KNOWN PRE-EXISTING
+    asset.service.spec.ts:203/:221; zero new issues.
+  npm run build (type-check): success
+  npx prettier --check: all files pass
+  npx prisma validate: valid
+  npx prisma migrate status: up to date (21 migrations)
+
+-----------------------------------------------------------------------
+12. KNOWN PRE-EXISTING ISSUES
+-----------------------------------------------------------------------
+PRE-EXISTING (separate from P5-U4; untouched):
+  - src/asset/asset.service.spec.ts:203/:221 lint errors (standing rule).
+  - Inventory "concurrent increments" flakiness under parallel suite
+    load (passes 17/17 in isolation; did not reproduce in this
+    unit's full regression runs; not claimed fixed).
+
+P5-U4 DEFECTS: none.
+
+-----------------------------------------------------------------------
+13. PHASE 4 / PHASE 3 COMPATIBILITY
+-----------------------------------------------------------------------
+ZERO changes to any frozen surface: PosOperation, PosOperationItem,
+the offline sync protocol, the offline payment boundary, reconciliation,
+PosFeedEvent, and all POS/Order/Payment state machines are untouched
+(all their suites green in the full run); money/RBAC/tenant semantics
+untouched; the existing 20 migrations untouched; no P4 permission
+modified.
+
+-----------------------------------------------------------------------
+14. FILES CHANGED
+-----------------------------------------------------------------------
+Created:
+  prisma/migrations/20260821180000_add_booking/migration.sql
+  src/booking/dto/booking.dto.ts / .spec.ts
+  src/booking/booking.service.ts / .spec.ts
+  src/booking/booking.controller.ts
+  src/booking/booking.module.ts
+  src/booking/booking.integration.spec.ts
+  docs/phase5_p5u4_report.txt (this file)
+
+Modified:
+  prisma/schema.prisma (Booking model + enum + Service/Customer backrefs)
+  src/app.module.ts (BookingModule import)
+  src/common/database/prisma/tenant-scoping.extension.ts (+1 model)
+  src/rbac/permission-catalog.ts (+3 keys, +1 category, +3 defs,
+    role defaults)
+
+-----------------------------------------------------------------------
+15. GIT
+-----------------------------------------------------------------------
+Commit message  : feat(booking): implement P5-U4 booking lifecycle
+                  foundation (Service-Catalog Booking)
+Branch          : main
+Remote          : origin (github.com/nguyenlekhanh/business-platform.git)
+
+-----------------------------------------------------------------------
+16. EXPLICIT STATEMENT
+-----------------------------------------------------------------------
+NO unapproved Phase 5 features were implemented:
+- NO Staff/Provider/Resource model (B16 collapsed per B1=Option A)
+- NO Availability/Schedule/Slot/Calendar (deferred to P5-U3+)
+- NO Pricing/Payment/Order link (deferred to P5-U5+)
+- NO Duration field (B5 deferred)
+- NO Store-scoped Service (B12 Model A confirmed)
+- NO Store-scoped Booking (B11 Option A confirmed)
+- NO Customer-store membership (B14 sub-option i confirmed)
+- NO Delete endpoint (soft-retirement via status)
+
+-----------------------------------------------------------------------
+FINAL BOUNDARY
+=======================================================================
+  P5-U4 COMPLETE -> DOCUMENTED -> COMMITTED -> PUSHED -> HARD STOP.
+  Confirmed NOT implemented: Staff, Resource, Schedule, Availability,
+  Pricing, Payment, Order links, Duration, Store-scoping.
+  DO NOT start P5-U5 (Commerce Integration) or any later unit.
+  Each requires separate explicit approval.
+=======================================================================

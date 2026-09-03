@@ -13,6 +13,7 @@ import { CartModule } from './cart/cart.module';
 import { OrderModule } from './order/order.module';
 import { PaymentModule } from './payment/payment.module';
 import { PosModule } from './pos/pos.module';
+import { BookingModule } from './booking/booking.module';
 import { ServiceModule } from './service/service.module';
 import { CategoryModule } from './category/category.module';
 import { CustomerModule } from './customer/customer.module';
@@ -57,6 +58,7 @@ import { validateEnv } from './common/config/env.validation';
     PaymentModule,
     PosModule,
     ServiceModule,
+    BookingModule,
   ],
   providers: [
     {
