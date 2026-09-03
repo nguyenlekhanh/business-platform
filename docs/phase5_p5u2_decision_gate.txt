@@ -1,0 +1,889 @@
+=======================================================================
+ PHASE 5 — BOOKING / SERVICE
+ P5-U2 — BOOKING TARGET & OWNERSHIP DECISION GATE
+ DECISION ANALYSIS ONLY — NO IMPLEMENTATION
+=======================================================================
+
+Checkpoint : Phase 5, Unit 2 Decision Gate (Booking Target & Ownership)
+Date       : 2026-09-02
+Status     : DECISION GATE COMPLETE — analysis documented; unresolved
+             business decisions explicitly identified; NO production
+             code, schema, migrations, APIs, DTOs, or RBAC created.
+Baseline   : Phase 4 frozen at 7365acf; P5-U1 complete at cf6751d;
+             HEAD = origin/main; working tree clean.
+Authoritative
+inputs     : docs/phase5_discovery_report.txt, docs/phase5_decision_gate.txt,
+             docs/phase5_p5u1_report.txt, docs/phase-progress.md,
+             prisma/schema.prisma, actual repository code inspection.
+
+=======================================================================
+1. EXECUTIVE SUMMARY
+=======================================================================
+The P5-U2 decision gate analyzes the interconnected ownership and
+booking-target cluster (B1, B11, B12, B13, B14, B16) that must be
+resolved coherently before any Booking implementation can begin.
+
+Repository evidence establishes TWO coherent candidate architectures
+(Option A: Service-Catalog Booking; Option B: Appointment Booking)
+and the infrastructure to support either. However, the repository
+contains NO business rule that selects between them. The decision is
+explicitly a business choice requiring user approval.
+
+Key finding: the Service model from P5-U1 was deliberately designed
+with NO preclusion (approved B1 non-preclusion) — it carries no
+staffId, resourceId, storeId, or bookingId fields — precisely so
+this decision gate could resolve the target without schema
+retrofitting.
+
+This gate documents the analysis, identifies which decisions are
+REPOSITORY FACTS vs ARCHITECTURAL CONSEQUENCES vs RECOMMENDATIONS
+vs REQUIRE USER APPROVAL, and produces the minimum approval set
+required before P5-U2 implementation can proceed.
+
+=======================================================================
+2. REPOSITORY EVIDENCE (VERIFIED)
+=======================================================================
+The following facts are established by direct inspection of the
+repository (schema.prisma, migrations, source code, existing docs):
+
+2.1 FROZEN BASELINES
+- Phase 3 (Core Commerce): Order/Payment state machines, money
+  representation (BigInt minor units, ISO-4217 Char(3), JSON strings),
+  tenant isolation, RBAC, Cart semantics, OrderItem snapshots — all
+  frozen at 2e2b80a and re-verified at 7365acf.
+- Phase 4 (POS + Offline Sync): PosOperation, PosOperationItem, sync
+  protocol, offline payment boundary, reconciliation, PosFeedEvent,
+  POS state machines — frozen at 7365acf.
+- Rental Reservation: EXCLUDE constraint on (equipmentId, tstzrange)
+  WHERE status IN ('RESERVED','ACTIVE') — frozen in migration
+  20260821020000. btree_gist extension installed. Phase 5 Booking
+  MUST be NEW additive code (phase-progress.md line 30).
+
+2.2 EXISTING DOMAINS (P5-U1 COMPLETE)
+- Service: tenant-scoped catalog entity only. Fields: id, tenantId,
+  name, description?, status (DRAFT|ACTIVE|ARCHIVED), timestamps.
+  @@unique([tenantId, name]). NO pricing (B23), NO duration (B5),
+  NO staffId/resourceId/bookingId/scheduleId/availabilityId (B1
+  non-preclusion). 20 migrations total.
+- Customer: tenant-scoped (NOT store-scoped). @@unique([tenantId,
+  code]). Shared by Reservation (RESTRICT) and Order (RESTRICT,
+  nullable). Same registry serves both frozen domains.
+- Store: tenant-scoped. StoreType enum (no SERVICE value). Optional
+  settings Json? (empty by design — no opening hours). Asset has
+  optional same-tenant storeId. PosDevice permanent store binding.
+  Inventory store pools (P4-U3 Option A).
+- User/Membership: only "staff" concept today. User = global
+  identity. Membership = user↔tenant↔role (tenant-level, no store
+  binding). No scheduling attributes.
+- RBAC: service:read, service:create, service:manage added in P5-U1.
+  No booking:* or staff:* keys exist.
+
+2.3 INFRASTRUCTURE PROVEN
+- Fail-closed tenant scoping via centralized Prisma extension
+  (TENANT_SCOPED_MODELS registration).
+- Keyset pagination envelope {data, meta.nextCursor} — universal.
+- PATCH (not PUT) on new domains (Phase 3+ convention D2).
+- Guard chain: JWT → TenantResolutionGuard → PermissionsGuard.
+- ValidationPipe: whitelist + transform + forbidNonWhitelisted.
+- DB-authoritative concurrency: EXCLUDE constraints (Reservation),
+  guarded updateMany (Inventory), P2002 unique arbitration.
+- UTC-only time: DateTime (timestamp(3)), half-open [start,end)
+  intervals, start<end validated, no timezone concept anywhere.
+- Migration discipline: additive handwritten SQL, migrate deploy
+  only, never modify existing migrations.
+
+=======================================================================
+3. B1 — WHAT DOES A BOOKING BOOK?
+=======================================================================
+
+REPOSITORY FACT:
+- NO Booking model exists in schema.prisma, migrations, or source.
+- The frozen Reservation books "ONE Equipment for ONE Customer over
+  a half-open interval" (migration 20260821020000 comment).
+- The commerce Order books nothing temporal.
+- StoreType has no SERVICE value.
+- P5-U1 Service model intentionally carries NO ownership of any
+  future booking target (no staffId, resourceId, bookingId,
+  scheduleId, availabilityId) — approved B1 non-preclusion.
+
+ARCHITECTURAL CONSEQUENCE:
+Two coherent candidate architectures emerge (documented in
+phase5_decision_gate.txt §3):
+
+Option A — SERVICE-CATALOG BOOKING (smallest schema):
+  Booking = Service + time interval
+  - No staff/provider required
+  - No resource required
+  - Booking.target = serviceId
+  - EXCLUDE constraint on (serviceId, tstzrange) WHERE holding
+  - B16 collapses (no staff model needed)
+  - Simplest migration, simplest RBAC, simplest availability
+
+Option B — APPOINTMENT BOOKING:
+  Booking = Service + Staff/Provider + time interval
+  - Staff becomes first-class booking target
+  - Requires B16 (Staff/Provider model)
+  - EXCLUDE constraint on (staffId, tstzrange) or composite
+    (serviceId, staffId, tstzrange) WHERE holding
+  - Staff schedules, multi-store staff, service-staff compatibility
+    all become real concerns
+  - Larger schema, more complex concurrency, more RBAC surface
+
+RECOMMENDATION:
+The repository evidence SUPPORTS Option A as the lower-risk
+architectural starting point because:
+  (a) Every piece maps 1:1 onto the frozen, tested Reservation
+      pattern (serviceId replaces equipmentId).
+  (b) The P5-U1 Service model was designed for this (tenant-scoped
+      catalog, no preclusion).
+  (c) Staff model can be added additively later if business requires
+      it — the reverse (removing staff after bookings exist) is the
+      expensive direction.
+  (d) Phase 3/4 commerce has no staff concept; introducing one here
+      would be a cross-cutting new domain.
+
+However: Option B is NOT rejected by repository evidence — it is a
+valid coherent architecture. The choice is a BUSINESS DECISION.
+
+REQUIRES USER APPROVAL:
+B1 — Select Option A (Service-Catalog Booking) or Option B
+(Appointment Booking). This decision drives B16, B22, B4, and the
+entire P5-U4 schema. Cannot be inferred from repository.
+
+=======================================================================
+4. B16 — STAFF / PROVIDER MODEL
+=======================================================================
+
+REPOSITORY FACT:
+- NO canonical Staff/Provider/Technician/Practitioner model exists
+  in schema.prisma or migrations.
+- The only staff-adjacent concept: User (global identity) +
+  Membership (tenant-scoped role assignment). Membership has NO
+  store binding, NO scheduling attributes, NO working hours, NO
+  bookable flag.
+- Asset is the generic "resource foundation" but is rental-adjacent
+  (Equipment 1:1 specialization) and partially frozen-adjacent;
+  nothing marks it as bookable.
+- Search across src/, prisma/, docs/ finds zero domain models for
+  staff/provider/practitioner/technician/worker.
+
+ARCHITECTURAL CONSEQUENCE:
+If Option B (Appointment Booking) is selected for B1, a Staff model
+IS REQUIRED. The minimum viable Staff model would need:
+
+  Staff {
+    id              cuid PK
+    tenantId        (server-derived)
+    userId?         FK -> User (nullable: staff can exist without login)
+    storeId?        FK -> Store (nullable: multi-store staff? B13)
+    name            (display name, not necessarily unique)
+    status          ACTIVE|INACTIVE|ARCHIVED
+    -- scheduling attributes (all deferred to P5-U3):
+    -- workingHours, timeOff, capacity, serviceAssignments
+    createdAt / updatedAt
+    @@index([tenantId])
+    @@index([tenantId, storeId])  -- if store-scoped
+    @@index([userId])             -- if user-linked
+  }
+
+Key design questions that B16 must resolve IF needed:
+  - Tenant ownership: YES (all booking models tenant-scoped per F5)
+  - Store relationship: nullable storeId (Asset precedent) or
+    mandatory (PosDevice precedent)? Depends on B11/B13.
+  - User relationship: nullable FK to User (staff without login
+    allowed? e.g. external contractors). Wrapping User (Option B
+    in decision gate) vs standalone (Option C).
+  - Multi-store: can one staff work at multiple stores? Requires
+    StaffStore join table if yes. Membership is tenant-level only.
+  - Service assignment: many-to-many Service↔Staff (what services
+    this staff can perform). Deferred to P5-U3.
+  - Active/inactive lifecycle: soft-retirement via ARCHIVED
+    (catalog convention) — consistent with Service/Product/Variant.
+  - RBAC: staff:read, staff:create, staff:manage (new keys —
+    REQUIRES APPROVAL). Does not reuse service:* or user:*.
+
+If Option A (Service-Catalog Booking) is selected for B1:
+  B16 COLLAPSES — no Staff model required in Phase 5. B6, B13
+  become moot. Phase 5 shrinks significantly.
+
+RECOMMENDATION:
+Do not create a Staff model unless B1 selects Option B. The
+repository has no scheduling attributes on User/Membership, and
+creating a parallel people-registry (User/Customer/Staff) should
+only happen if bookings actually book staff.
+
+REQUIRES USER APPROVAL:
+B16 — Conditional on B1. If B1 = Option A: "No staff model in
+Phase 5" is the outcome. If B1 = Option B: must decide (a) no
+staff (contradicts B1), (b) wrap User with additive profile, or
+(c) standalone named-entity model. This is a business decision.
+
+=======================================================================
+5. B11 — BOOKING STORE SCOPE
+=======================================================================
+
+REPOSITORY FACT:
+BOTH store-scoping patterns exist in the repository:
+- Tenant-wide (NO storeId): Customer, Order, OrderItem, Payment,
+  Reservation, Category, Product, ProductVariant, Price, Cart,
+  CartItem, Service (P5-U1). These live beside the customer/commerce
+  chain.
+- Store-bound (mandatory storeId): PosDevice (permanent binding),
+  PosSession, PosSale, PosOperation, PosOperationItem, PosFeedEvent.
+- Store-optional (nullable storeId): Asset (validated same-tenant),
+  Inventory (partial unique: (variantId) WHERE storeId IS NULL +
+  (storeId, variantId) WHERE storeId IS NOT NULL).
+
+ARCHITECTURAL CONSEQUENCE:
+Three coherent options for Booking:
+
+Option A — Tenant-wide (like Order/Reservation/Customer):
+  Booking has tenantId only. No storeId column.
+  - Simplest: matches the customer/commerce chain a booking most
+    naturally lives beside (customer is tenant-wide, order is
+    tenant-wide).
+  - Service is tenant-scoped (P5-U1) — consistent.
+  - Cross-store booking ambiguity: none (booking not bound to store).
+  - Availability: tenant-wide pool (like Reservation equipment).
+  - Future store-scoping additive: optional storeId column can be
+    added later with default NULL, backfilled, then made mandatory
+    if needed (but NOT NULL→nullable is trivial; nullable→NOT NULL
+    requires data backfill).
+
+Option B — Store-scoped (like PosDevice/Inventory pools):
+  Booking has mandatory storeId. @@unique constraints and indexes
+  include storeId. Every query scoped to store.
+  - Enables store isolation of availability (store A's bookings don't
+    block store B's staff/resources).
+  - Adds scoping to EVERY query (tenantId + storeId).
+  - Affects EXCLUDE constraint target: (storeId, staffId, tstzrange)
+    or (storeId, serviceId, tstzrange).
+  - Cross-store booking (B12) becomes a real question.
+  - Migration risk: if chosen later after tenant-wide data exists,
+    requires adding storeId + backfill + NOT NULL — destructive-ish.
+
+Option C — Optional storeId (like Asset):
+  Booking has nullable storeId. Most schema-flexible, weakest
+  invariant. Cross-store ambiguity: a booking with storeId=NULL —
+  which store's availability does it consume?
+
+RECOMMENDATION:
+Repository evidence SUPPORTS Option A (tenant-wide) because:
+  (a) Customer is tenant-wide — the customer/commerce chain is the
+      natural neighbor of a booking.
+  (b) Service is tenant-scoped (P5-U1 approved) — consistent.
+  (c) Order/Reservation are tenant-wide — proven pattern for
+      temporal/financial entities.
+  (d) Store-scoping can be added additively later if business
+      requires it (nullable column → backfill → NOT NULL).
+  (e) P5-U1 explicitly designed Service for additive storeId.
+
+However: If the business operates multi-store with store-isolated
+staff/schedules/availability, Option B may be the correct long-term
+choice. The repository cannot decide.
+
+REQUIRES USER APPROVAL:
+B11 — Select Option A (tenant-wide), Option B (store-scoped
+mandatory), or Option C (nullable). This decision couples with
+B12, B13, B14 as one ownership choice at P5-U2.
+
+=======================================================================
+6. B12 — SERVICE STORE OWNERSHIP
+=======================================================================
+
+REPOSITORY FACT:
+P5-U1 Service is tenant-scoped: @@unique([tenantId, name]). NO
+storeId column. Registered in TENANT_SCOPED_MODELS.
+
+Product (Commerce) is tenant-scoped: @@unique([tenantId, code]).
+Inventory is per-store (partial unique indexes).
+
+ARCHITECTURAL CONSEQUENCE:
+Two models for Service ownership:
+
+Model A — Service remains tenant-scoped (P5-U1 as implemented):
+  - unique(tenantId, name) stays.
+  - If Booking is store-scoped (B11=B), Booking has storeId; Service
+    does not. A service can be booked at multiple stores.
+  - Availability: tenant-wide pool per service (or per
+    service+store if availability is store-scoped).
+  - Migration: zero changes to Service. Additive storeId on Booking
+    only.
+  - Reuse across stores: natural (same Service catalog entry).
+
+Model B — Service becomes store-scoped:
+  - Service gains mandatory storeId. @@unique([tenantId, storeId,
+    name]) or similar.
+  - Booking references store-scoped Service.
+  - Migration cost: ALTER TABLE Service ADD storeId; create partial
+    unique indexes; backfill existing services to a default store;
+    update all queries to scope by storeId. Destructive-ish if real
+    data exists.
+  - Cross-store Service: requires ServiceStore join table (like
+    Inventory pools) or duplicate Service rows per store.
+  - API changes: /services list/queries gain storeId filter.
+
+RECOMMENDATION:
+Model A is strongly supported by repository evidence:
+  - P5-U1 was APPROVED with tenant-scoped Service (B2, B23, B5,
+    B21, B1 non-preclusion all implemented).
+  - Product (goods catalog) is tenant-scoped — services mirror
+    products.
+  - Inventory handles per-store stock separately; Service catalog
+    need not duplicate.
+  - Changing Service ownership AFTER P5-U1 is implemented would
+    invalidate the approved P5-U1 migration and require a new
+    migration that modifies an existing table — violates the
+    deploy-only discipline's spirit (additive only).
+
+Model B should only be chosen if there is a COMPELLING business
+reason that services are fundamentally store-specific (e.g. "Haircut
+at Store A" is a different service than "Haircut at Store B" with
+different pricing/duration/staff). The repository has no evidence
+for this.
+
+REQUIRES USER APPROVAL:
+B12 — Confirm Service remains tenant-scoped (Model A). If the user
+wants Model B, it must be explicitly approved with acknowledgment
+of migration cost and P5-U1 rework.
+
+=======================================================================
+7. B13 — CUSTOMER OWNERSHIP / GUEST SEMANTICS
+=======================================================================
+
+REPOSITORY FACT:
+- Customer is tenant-scoped, NOT store-scoped. @@unique([tenantId,
+  code]). Shared registry for Reservation (RESTRICT) and Order
+  (RESTRICT, nullable).
+- Order.customerId is NULLABLE (the frozen "walk-in/zero-customer"
+  commerce rule — Phase 3 D1 approved).
+- Reservation.customerId is REQUIRED (NOT NULL, RESTRICT).
+- Both frozen precedents exist in the SAME repository.
+
+ARCHITECTURAL CONSEQUENCE:
+Booking customerId options:
+
+Option A — Required (Reservation-style):
+  customerId NOT NULL, FK RESTRICT. P2003 mapped to 409.
+  - Strongest history invariants.
+  - No guest bookings.
+  - Consistent with rental domain.
+
+Option B — Optional (Order-style):
+  customerId NULLABLE, FK RESTRICT when present.
+  - Allows guest/walk-in bookings.
+  - Follows the POS walk-in precedent (Phase 3/4 commerce).
+  - A later NOT NULL→nullable relaxation is trivial; nullable→NOT
+    NULL requires data backfill.
+
+Option C — Customer snapshot:
+  Booking denormalizes customer name/email/phone at creation.
+  - No FK to Customer. Loses RESTRICT protection.
+  - Adds denormalization complexity; not aligned with repository
+    patterns (Order/Payment/Reservation all use live FKs).
+
+RECOMMENDATION:
+Option B (optional, Order-style) is RECOMMENDED because:
+  (a) The commerce walk-in rule is already APPROVED and frozen
+      (Phase 3 D1). Booking following the same pattern is
+      consistent.
+  (b) The nullable FK + RESTRICT pattern is already implemented
+      and tested for Order.
+  (c) If guest bookings are never needed, the field simply stays
+      NULL — no harm.
+  (d) The reverse (required→optional) is the expensive direction.
+
+However: This is a BUSINESS DECISION. If the domain requires every
+booking to have a known customer (e.g. medical, regulated), Option A
+is correct.
+
+REQUIRES USER APPROVAL:
+B13 — Select Option A (required) or Option B (optional/nullable).
+Mark Option C as rejected (no repository precedent).
+
+=======================================================================
+8. B14 — CROSS-STORE CUSTOMER SEMANTICS
+=======================================================================
+
+REPOSITORY FACT:
+- Customer is tenant-scoped (NOT store-scoped). Verified in schema
+  and phase5_discovery_report.txt §8.
+- A tenant with multiple stores has ONE customer registry.
+- Order (tenant-wide) references Customer — cross-store orders work
+  today (customer from store A places order at store B — no store
+  binding on Order).
+- Reservation (tenant-wide) references Customer — cross-store
+  reservations work today.
+- NO customer-store membership table exists. Membership is
+  user↔tenant↔role only.
+
+ARCHITECTURAL CONSEQUENCE:
+The invariant is determined by B11 (Booking store scope):
+
+If Booking is tenant-wide (B11=Option A):
+  "A Booking may reference a Customer from the same tenant
+  regardless of store." — No cross-store restriction possible or
+  needed. Customer is tenant-wide; Booking is tenant-wide.
+
+If Booking is store-scoped (B11=Option B):
+  Two sub-options:
+  (i) No customer-store membership: Booking at Store A can
+      reference any tenant Customer. Cross-store allowed by default.
+      (Matches current Order/Reservation behavior.)
+  (ii) Customer-store membership required: Add CustomerStore join
+       table; Booking creation validates customer belongs to
+       booking's store. New model, new migration, new invariant.
+
+RECOMMENDATION:
+Sub-option (i) — no customer-store membership — is strongly
+supported:
+  - Zero new model. Reuses existing tenant-wide Customer pattern.
+  - Order and Reservation already work this way (proven).
+  - If business later requires restriction, CustomerStore can be
+    added additively.
+
+REQUIRES USER APPROVAL:
+B14 — Confirm "A Booking may reference a Customer from the same
+tenant regardless of store" (sub-option i). If business requires
+store-level customer membership, explicitly approve sub-option (ii)
+with acknowledgment of new model/migration.
+
+=======================================================================
+9. OWNERSHIP MATRIX
+=======================================================================
+
+Entity          | Tenant-owned | Store-owned | User/Principal | Cross-store
+----------------+--------------+-------------+----------------+------------
+Tenant          | YES (root)   | NO          | NO             | N/A
+Store           | YES          | self        | NO             | N/A (tenant has many)
+Customer        | YES          | NO          | NO             | YES (tenant-wide)
+Service (P5-U1) | YES          | NO*         | NO             | YES (tenant-wide)
+Booking         | YES          | ? (B11)     | NO             | ? (depends on B11)
+Staff/Provider  | YES          | ? (B13)     | wraps User?    | ? (depends on B11/B16)
+Resource**      | YES          | optional    | NO             | optional (Asset precedent)
+Order           | YES          | NO          | YES (creator)  | YES (tenant-wide)
+Payment         | YES          | NO          | NO             | YES (tenant-wide)
+PosDevice       | YES          | YES (perm)  | NO             | NO (permanent binding)
+PosSession      | YES          | YES         | YES (cashier)  | NO
+PosOperation    | YES          | YES         | YES            | NO
+Inventory       | YES          | YES (pools) | NO             | N/A (per-store pools)
+
+* Service is intentionally tenant-scoped in P5-U1. B12 analyzes
+  whether this should change. RECOMMENDATION: remain tenant-scoped.
+** Resource = bookable room/equipment (not Asset). Not yet decided.
+
+Booking-specific sources (depends on B1/B11/B16):
+  tenantId:  ALWAYS server-derived from TenantContext (F5)
+  storeId:   B11=Option A → NONE; B11=Option B → from booking
+             context (staff's store? service's store? explicit?);
+             B11=Option C → nullable
+  serviceId: from client input, validated tenant-scoped, Service
+             must be ACTIVE
+  customerId: from client input (or null if B13=Option B),
+             validated tenant-scoped, Customer must exist
+  staffId:   ONLY if B1=Option B and B16≠Option A; from client
+             input, validated tenant-scoped, Staff must be ACTIVE
+
+=======================================================================
+10. CANDIDATE ARCHITECTURES
+=======================================================================
+
+ARCHITECTURE A — SERVICE-CATALOG BOOKING (Option A from B1)
+------------------------------------------------------------
+B1:  Service + time interval (no staff, no resource)
+B11: Tenant-wide (Option A)
+B12: Service tenant-scoped (Model A)
+B13: Customer optional/nullable (Order-style, Option B)
+B14: Cross-store customer allowed (sub-option i)
+B16: No staff model (collapses)
+B4:  Arbitrary windows (Reservation-style)
+B10: UTC-only (F9)
+B22: EXCLUDE ON (serviceId, tstzrange) WHERE holding
+B9:  1:1 capacity (Reservation-identical)
+
+Schema:
+  Booking {
+    id, tenantId, serviceId, customerId?, startAt, endAt,
+    status (BOOKED|CANCELLED|COMPLETED|NO_SHOW),
+    createdAt, updatedAt
+    @@unique/idx: (tenantId, serviceId, startAt, id) for keyset
+    EXCLUDE USING gist (serviceId WITH =, tstzrange(startAt,endAt,'[)')
+          WHERE status IN ('BOOKED','CONFIRMED','ACTIVE')
+  }
+
+Advantages:
+  - Smallest schema (1 new model, 1 FK to Service, 1 nullable FK
+    to Customer)
+  - Maps 1:1 onto frozen Reservation pattern (proven concurrency)
+  - No staff model, no staff schedules, no service-staff
+    compatibility matrix
+  - Service catalog (P5-U1) directly reusable
+  - Additive path to staff later: add staffId nullable, then
+    EXCLUDE dimension
+  - P5-U2 essentially skipped (or minimal: just confirm no staff)
+
+Disadvantages:
+  - Cannot represent "Dr. Smith at 10am" vs "Dr. Jones at 10am"
+    for same service
+  - If business requires staff assignment, requires additive
+    migration later
+
+ARCHITECTURE B — APPOINTMENT BOOKING (Option B from B1)
+-------------------------------------------------------
+B1:  Service + Staff + time interval
+B11: Tenant-wide (Option A) or Store-scoped (Option B)
+B12: Service tenant-scoped (Model A)
+B13: Customer optional/nullable (Option B)
+B14: Cross-store customer allowed (sub-option i)
+B16: Staff model required (standalone or User-wrapped)
+B4:  Arbitrary windows (Reservation-style) or fixed slots
+B10: UTC-only (F9)
+B22: EXCLUDE ON (staffId, tstzrange) WHERE holding (or composite)
+B9:  1:1 per staff (or capacity>1 if group)
+
+Schema additions:
+  Staff { id, tenantId, userId?, storeId?, name, status, ... }
+  Booking { ..., staffId, ... }
+  EXCLUDE on (staffId, tstzrange) or (serviceId, staffId, tstzrange)
+  ServiceStaff { serviceId, staffId } many-to-many (P5-U3)
+
+Advantages:
+  - Models real-world appointment businesses (salon, clinic, etc.)
+  - Staff availability/schedules become first-class
+  - Per-staff overlap protection (DB-authoritative)
+
+Disadvantages:
+  - Significantly larger schema (Staff, ServiceStaff, StaffSchedule,
+    StaffTimeOff, ...)
+  - More complex concurrency (staff double-booking)
+  - Staff-store relationship (B13) must be resolved
+  - Cross-cutting: if B11=store-scoped, staff must be store-scoped
+  - Migration risk: EXCLUDE target decision (B22) locked early
+  - RBAC surface grows (staff:read/create/manage)
+
+INCOHERENT COMBINATIONS (REJECTED):
+- B1=Option A (no staff) + B16=Option B/C (staff model) → dead
+  schema, staff never booked
+- B1=Option B (staff) + B16=Option A (no staff) → impossible
+- B11=Option B (store-scoped bookings) + B12=Model A (tenant
+  Service) + B14=multi-store Service WITHOUT cross-store
+  resolution → ambiguous isolation
+- B4=Option B (fixed slots) + B1=Option C (resource-only) →
+  double inventory of time (slots + resource calendars)
+
+=======================================================================
+11. SECURITY MODEL — FUTURE ENFORCEMENT POINTS
+=======================================================================
+
+For the chosen architecture, these enforcement points apply:
+
+| Threat                        | Trusted Source           | Authorization Boundary                    | DB Constraint         |
+|-------------------------------|--------------------------|-------------------------------------------|-----------------------|
+| tenantId injection            | TenantContext (header)   | Extension fail-closed (F5)                | FK tenantId CASCADE   |
+| storeId injection             | Server-derived from      | If store-scoped: session/device binding   | FK storeId RESTRICT   |
+|                               | session/device (P4-U4)   | or explicit validation                    |                       |
+| serviceId injection           | Client input             | ServiceService.find (tenant-scoped)       | FK serviceId RESTRICT |
+| customerId injection          | Client input (or null)   | CustomerService.find (tenant-scoped)      | FK customerId RESTRICT|
+| staffId injection             | Client input             | StaffService.find (tenant-scoped)         | FK staffId RESTRICT   |
+| bookingId IDOR                | Extension scoping        | Extension scopes by tenantId              | Tenant-scoped model   |
+| Cross-store access            | If B11=B: storeId from   | Store scoping in extension (PosDevice     | Composite unique/idx  |
+|                               | session/device           | precedent)                                | on (tenantId,storeId) |
+| Unauthorized booking create   | PermissionsGuard         | booking:create \| booking:manage          | N/A                   |
+| Unauthorized booking manage   | PermissionsGuard         | booking:manage                            | N/A                   |
+| Unauthorized cancel/reschedule| Guarded transitions      | State machine + ownership check           | Status enum + FK      |
+
+All enforcement patterns exist in the repository today (P4-U8
+verified). No new security model needed — only new RBAC keys and
+tenant-scoped model registration.
+
+=======================================================================
+12. FUTURE AVAILABILITY COMPATIBILITY
+=======================================================================
+
+The frozen Reservation architecture provides the proven template:
+- Half-open intervals [startAt, endAt) UTC
+- PostgreSQL btree_gist EXCLUDE constraint
+- tstzrange AT TIME ZONE 'UTC' for deterministic range materialization
+- WHERE clause scopes to holding statuses (RESERVED, ACTIVE)
+- Application pre-check 409 + DB constraint = two-layer protection
+
+Compatibility for each candidate:
+
+ARCHITECTURE A (Service-Catalog):
+  EXCLUDE ON (serviceId, tstzrange(startAt,endAt,'[)') WITH &&
+  WHERE status IN (holding)
+  - Direct 1:1 mapping. Zero new machinery.
+  - Staff schedules, resource schedules, store hours — all DEFERRED
+    to P5-U3+ (if ever needed).
+
+ARCHITECTURE B (Appointment):
+  Option B1: EXCLUDE ON (staffId, tstzrange) WHERE holding
+    - Protects staff double-booking.
+    - Service-level overlap requires separate constraint or
+      composite (serviceId, staffId, tstzrange).
+  Option B2: EXCLUDE ON (storeId, staffId, tstzrange) WHERE holding
+    - If store-scoped bookings + per-store staff.
+  - Staff schedules (B6), resource schedules (B7), store hours (B8)
+    become real P5-U3 implementation work.
+  - Timezone (B10) MUST be resolved before P5-U3: UTC-only (F9)
+    strongly recommended. Business timezone = cross-cutting
+    representation change.
+
+Both architectures remain compatible with the frozen Reservation
+pattern. The choice of EXCLUDE target (B22) is the critical decision
+that must be frozen BEFORE the first Booking migration (see §13).
+
+=======================================================================
+13. CONCURRENCY CONSEQUENCES
+=======================================================================
+
+Future database-level invariants needed:
+
+ARCHITECTURE A:
+  - Double booking same Service: EXCLUDE (serviceId, tstzrange)
+    WHERE holding — DB arbitrates (F6).
+  - No staff/resource conflicts (not booked).
+
+ARCHITECTURE B:
+  - Double booking same Staff: EXCLUDE (staffId, tstzrange) WHERE
+    holding — DB arbitrates.
+  - Overlapping staff appointments: same constraint.
+  - If store-scoped (B11=B): EXCLUDE (storeId, staffId, tstzrange)
+    — prevents cross-store staff double-booking.
+  - Capacity>1 (B9): guarded conditional updateMany on slot counter
+    (Inventory pattern).
+
+DECISIONS THAT MUST BE FROZEN BEFORE FIRST BOOKING MIGRATION:
+  1. B1 (what is booked) — determines EXCLUDE target dimension(s)
+  2. B4 (availability model) — arbitrary windows vs slots changes
+     constraint shape
+  3. B11 (Booking store scope) — adds storeId to constraint if B
+  4. B16 (Staff model) — if staff booked, staffId in constraint
+  5. B22 (overlap target + layer) — explicit confirmation of
+     DB-authoritative EXCLUDE (F6) vs app-layer-only
+
+Changing any of these after bookings exist = dropping/recreating a
+live EXCLUDE constraint on a tenant table with history — the single
+most expensive refactor in the phase (phase5_decision_gate.txt R1).
+
+=======================================================================
+14. RBAC ANALYSIS
+=======================================================================
+
+P5-U1 current: service:read, service:create, service:manage
+(admin+=all, employee+=read, owner=semantic-all).
+
+Future keys needed (all NEW — REQUIRE EXPLICIT APPROVAL):
+
+| Permission Key      | Reuse? | Required For               | Notes                                    |
+|---------------------|--------|----------------------------|------------------------------------------|
+| booking:read        | NEW    | GET /bookings, /:id        | Standard catalog read                    |
+| booking:create      | NEW    | POST /bookings             | Customer self-service? Staff-only?       |
+| booking:manage      | NEW    | PATCH /:id (cancel/etc)    | Never implies execute (F8/D7)            |
+| staff:read          | NEW    | GET /staff, /:id           | Only if B16≠Option A                     |
+| staff:create        | NEW    | POST /staff                | Admin-only typically                     |
+| staff:manage        | NEW    | PATCH /staff/:id           | Schedule/assignment changes              |
+| schedule:read       | NEW    | GET /schedules             | Deferred to P5-U3                        |
+| schedule:manage     | NEW    | POST/PATCH /schedules      | Deferred to P5-U3                        |
+| availability:read   | NEW    | GET /availability          | Deferred to P5-U3                        |
+
+Role defaults (repository-supported template):
+- admin += all *_MANAGE keys
+- employee += *_READ only (or booking:create if POS-like)
+- owner = semantic all-permissions
+- Creating (booking:create) NEVER implies executing
+  (booking:manage) — F8/D7 precedent.
+
+REQUIRES USER APPROVAL:
+Exact key shapes and employee defaults for booking:* and
+staff:*. The five-key pattern is the repository default; minimal
+read/create/manage is an alternative. Both are mechanical (additive
+catalog rows) but change security surface.
+
+=======================================================================
+15. RECOMMENDED ARCHITECTURE
+=======================================================================
+
+Based on repository evidence, the RECOMMENDED coherent configuration
+is:
+
+  B1  = Option A (Service-Catalog Booking) — REPOSITORY FACT:
+       smallest coherent mapping onto frozen Reservation pattern.
+       ARCHITECTURAL RECOMMENDATION: start here; staff additive.
+       REQUIRES USER APPROVAL: business must confirm no staff
+       booking needed in Phase 5.
+
+  B11 = Option A (Tenant-wide Booking) — REPOSITORY FACT:
+       Customer/Order/Reservation are tenant-wide. Service is
+       tenant-scoped (P5-U1). ARCHITECTURAL RECOMMENDATION: tenant-
+       wide matches the customer/commerce chain; store-scoping
+       additive later. REQUIRES USER APPROVAL: if business requires
+       store-isolated availability, must choose Option B.
+
+  B12 = Model A (Service remains tenant-scoped) — REPOSITORY FACT:
+       P5-U1 approved and implemented this way. Product catalog is
+       tenant-scoped. Inventory handles per-store stock separately.
+       ARCHITECTURAL RECOMMENDATION: do not change. REQUIRES USER
+       APPROVAL: only if compelling business reason exists.
+
+  B13 = Option B (Customer optional/nullable) — REPOSITORY FACT:
+       Order.customerId nullable (approved D1, frozen). Reservation
+       requires customer. Both precedents exist. ARCHITECTURAL
+       RECOMMENDATION: follow Order walk-in precedent (nullable).
+       REQUIRES USER APPROVAL: if domain requires known customer.
+
+  B14 = Sub-option i (Cross-store customer allowed) — REPOSITORY
+       FACT: Customer is tenant-wide; Order/Reservation already
+       cross-store. ARCHITECTURAL RECOMMENDATION: no customer-store
+       membership. REQUIRES USER APPROVAL: if business restricts.
+
+  B16 = Option A (No staff model in Phase 5) — REPOSITORY FACT:
+       No staff model exists. Conditional on B1=Option A.
+       ARCHITECTURAL RECOMMENDATION: collapse B16; add staff
+       additively in later unit if B1 changes. REQUIRES USER
+       APPROVAL: implicit in B1 decision.
+
+If the user selects B1=Option B, the entire configuration flips to
+Architecture B and B16 becomes REQUIRED (not collapsed).
+
+=======================================================================
+16. MINIMUM USER APPROVAL REQUIRED BEFORE P5-U2 IMPLEMENTATION
+=======================================================================
+
+The following decisions MUST be explicitly approved by the user
+before any P5-U2 production code can be written:
+
+B1  — Booking target: Option A (Service-Catalog) or Option B
+      (Appointment)? This is the PRIMARY decision; all others
+      cascade from it.
+
+B11 — Booking store scope: Option A (tenant-wide), Option B
+      (store-scoped mandatory), or Option C (nullable)? Coupled
+      with B12/B13/B14 as one ownership choice.
+
+B12 — Service store ownership: Confirm Model A (tenant-scoped) or
+      approve Model B (store-scoped with migration cost)?
+
+B13 — Customer required or optional? Option A (required,
+      Reservation-style) or Option B (optional, Order-style)?
+
+B14 — Cross-store customer: Confirm sub-option i (allowed) or
+      approve sub-option ii (customer-store membership required)?
+
+B16 — Conditional on B1: If B1=Option A → "No staff model"
+      (collapses). If B1=Option B → select staff model variant
+      (b: wrap User, c: standalone).
+
+B10 — Timezone: UTC-only (strongly supported by F9) or per-store
+      business timezone? Must be resolved before P5-U3 but should
+      be acknowledged now.
+
+The following CAN BE DEFERRED to their named units:
+  B3, B4, B5, B6, B7, B8, B9, B15, B17, B18, B19, B20, B22
+  (all documented as SAFE TO DEFER in phase5_decision_gate.txt)
+
+=======================================================================
+17. P5-U2 IMPLEMENTATION PLAN (PLANNING ONLY)
+=======================================================================
+
+IF the above decisions are approved, P5-U2 would implement:
+
+Models (additive, tenant-scoped, register in TENANT_SCOPED_MODELS):
+
+Option A path (B1=Option A, B16 collapses):
+  - NO new models in P5-U2. P5-U2 essentially skipped.
+  - Proceed directly to P5-U3 (Availability) or P5-U4 (Booking
+    lifecycle) with Architecture A.
+
+Option B path (B1=Option B, B16 required):
+  Staff {
+    id cuid PK
+    tenantId (server-derived)
+    userId String? @unique (nullable FK -> User CASCADE)
+    storeId String? (FK -> Store RESTRICT; nullable per Asset
+      precedent; B13 decision)
+    name String
+    status StaffStatus @default(ACTIVE)  -- ACTIVE|INACTIVE|ARCHIVED
+    createdAt / updatedAt
+    @@index([tenantId])
+    @@index([tenantId, storeId])
+    @@index([userId])
+  }
+  ServiceStaff (many-to-many, P5-U3):
+    serviceId, staffId, tenantId
+    @@unique([serviceId, staffId])
+  Booking (P5-U4):
+    id, tenantId, storeId?, serviceId, staffId, customerId?,
+    startAt, endAt, status, timestamps
+    EXCLUDE on (staffId, tstzrange) or composite
+
+Relationships:
+  Staff ↔ User: one-to-one or one-to-many (one user = multiple
+    staff records? Business decision)
+  Staff ↔ Store: many-to-one (nullable) or many-to-many (if
+    multi-store staff — requires StaffStore join table)
+  Service ↔ Staff: many-to-many (what services staff can perform)
+
+Indexes:
+  Staff: (tenantId), (tenantId, storeId), (userId)
+  Booking: (tenantId), (tenantId, serviceId, startAt, id),
+    (tenantId, staffId, startAt, id) — keyset parity
+  EXCLUDE constraint per B22 (handwritten SQL, btree_gist)
+
+APIs (PATCH on new domains):
+  /staff GET(paginated)|POST; /staff/:id GET|PATCH|DELETE
+  /staff/:id/services GET|POST|DELETE (assignments)
+  /bookings (deferred to P5-U4)
+
+RBAC:
+  staff:read, staff:create, staff:manage (new category 'staff')
+  booking:read, booking:create, booking:manage (new category
+  'booking')
+  Role defaults per §14 template.
+
+Tests:
+  Unit: DTO specs, service specs (mocked Prisma), fail-closed,
+  uniqueness, projections, pagination.
+  Integration: 401/403 matrix, IDOR cross-tenant 404, tenantId
+  injection 400, cross-store isolation (if B11=B), concurrent
+  double-booking (DB EXCLUDE proves exactly-one-winner),
+  validation matrix (injection rejection with zero mutation).
+
+Migration:
+  One additive handwritten SQL migration at next slot
+  (20260821180000+). CREATE TYPE StaffStatus, CREATE TABLE Staff,
+  indexes, FKs. NO existing migration modified.
+
+=======================================================================
+18. UNRESOLVED DECISIONS (REQUIRE USER APPROVAL)
+=======================================================================
+
+The following decisions remain UNRESOLVED and REQUIRE EXPLICIT USER
+APPROVAL before P5-U2 implementation can begin:
+
+1. B1  — Booking target: Service-Catalog (A) vs Appointment (B)
+2. B11 — Booking store scope: tenant-wide (A) vs store-scoped (B)
+       vs nullable (C)
+3. B12 — Service ownership: confirm tenant-scoped or change to
+       store-scoped
+4. B13 — Customer required vs optional (nullable)
+5. B14 — Cross-store customer: allowed vs membership required
+6. B16 — Staff model: none (if B1=A) vs wrap User vs standalone
+       (if B1=B)
+7. B10 — Timezone: UTC-only (recommended) vs business timezone
+
+All other B* decisions are SAFE TO DEFER to their named units per
+the dependency graph (phase5_decision_gate.txt §4).
+
+=======================================================================
+19. EXPLICIT STATEMENT
+=======================================================================
+NO production implementation was performed during this decision
+gate. No Booking, Staff, Provider, Resource, Schedule, Calendar,
+Availability, or Notification models, migrations, APIs, DTOs, RBAC
+keys, or tests were created. The only artifacts are this document
+and the decision-gate checkpoint entry in docs/phase-progress.md.
+
+=======================================================================
+END OF DECISION GATE
+=======================================================================
