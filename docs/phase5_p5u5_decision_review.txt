@@ -1,0 +1,519 @@
+=======================================================================
+ PHASE 5 — BOOKING / SERVICE
+ P5-U5 — COMMERCE INTEGRATION
+ DECISION REVIEW ARTIFACT (HUMAN REVIEW ONLY — NO APPROVAL)
+=======================================================================
+
+Checkpoint : Phase 5, Unit 5 Decision Review (pre-implementation)
+Date       : 2026-09-02
+Status     : REVIEW ARTIFACT — analysis documented; decisions C1-C8, B10
+             require explicit human approval. NO production code,
+             schema, migrations, APIs, DTOs, or RBAC created.
+Baseline   : Phase 4 frozen at 7365acf; P5-U4 complete at a0b4103;
+             HEAD = origin/main; working tree clean.
+             Unit tests: 826/826; Integration: 733/733.
+Governing
+documents : docs/phase5_p5u5_discovery_gate.txt, docs/phase5_p5u4_report.txt,
+            docs/phase5_p5u2_decision_gate.txt, docs/phase5_decision_gate.txt,
+            docs/phase5_discovery_report.txt, docs/phase-progress.md,
+            Phase 3 U9 final report, Phase 4 U9 final report,
+            actual repository source code.
+
+=======================================================================
+GUIDING PRINCIPLES
+=======================================================================
+- REPOSITORY FACT: directly verifiable from source code, schema, tests
+- EXISTING INVARIANT: proven pattern already in the repository
+- INFERENCE: logical deduction from evidence, not yet approved
+- PROPOSED DECISION: recommendation requiring human approval
+- ARCHITECTURAL CONSEQUENCE: system-level impact
+- BUSINESS CONSEQUENCE: product/operational impact
+- SCHEMA/API IMPACT: concrete schema/API changes
+- FAILURE/RETRY CONSEQUENCES: error modes, compensation
+- WHAT REMAINS DEFERRED: explicitly not decided here
+
+=======================================================================
+1. BOOKING ↔ ORDER BOUNDARY — DEEP ANALYSIS
+=======================================================================
+
+Four concrete models compared:
+
+MODEL A: Booking has NO Commerce link
+--------------------------------------
+Booking = pure temporal entity (Service + time). No Order, no Payment.
+
+Who creates Booking?          Customer/Staff via Booking API
+Who creates Order?            N/A (no Order)
+Can Booking exist without Order? YES (always)
+Can Order exist without Booking? N/A
+Can one Order represent multiple Bookings? N/A
+What happens if Order creation fails? N/A
+What happens on request retry?  Booking retry handled by EXCLUDE/P2002
+What happens on concurrent requests? EXCLUDE constraint arbitrates
+What happens when Booking is cancelled? Status → CANCELLED
+What happens when Order is cancelled? N/A
+What happens when Payment fails? N/A
+What happens when Payment succeeds? N/A
+Can Booking and Order temporarily have different lifecycle states? N/A
+Which domain is authoritative for temporal state? Booking (sole)
+Which domain is authoritative for financial state? N/A
+What transaction boundary is required? Booking only (single transaction)
+Is an outbox/event mechanism required? NO
+What tenant invariant applies? Booking is tenant-scoped (F5)
+
+ARCHITECTURAL CONSEQUENCE: Pure temporal domain. Zero cross-domain coupling.
+BUSINESS CONSEQUENCE: No monetization path. Booking is purely a reservation.
+SCHEMA/API IMPACT: Zero changes to Order/Payment. Booking API unchanged.
+FAILURE/RETRY: Booking creation already idempotent via EXCLUDE/P2002.
+WHAT REMAINS DEFERRED: All commerce decisions (pricing, payment, refunds, inventory).
+
+
+MODEL B: Booking has optional Order provenance/reference (RECOMMENDED)
+----------------------------------------------------------------------
+Booking remains temporally authoritative. Order remains financially authoritative.
+Additive provenance link (nullable FK or provenance table like PosSale).
+
+Who creates Booking?          Customer/Staff via Booking API
+Who creates Order?            Later (checkout, POS, webhook) via existing T1
+Can Booking exist without Order? YES (always — optional link)
+Can Order exist without Booking? YES (walk-in orders, POS orders)
+Can one Order represent multiple Bookings? NO (1:1 provenance, like PosSale)
+What happens if Order creation fails? Booking unaffected; retry Order creation separately
+What happens on request retry? Booking retry = EXCLUDE/P2002; Order retry = T5 idempotency
+What happens on concurrent requests? Booking = EXCLUDE; Order = T1/T5 guards
+What happens when Booking is cancelled? Booking status → CANCELLED; Order unchanged (or T3 if linked)
+What happens when Order is cancelled? Order T3 (CANCELLED + restock); Booking unchanged
+What happens when Payment fails? Payment T2 fail; Order stays PENDING; Booking unchanged
+What happens when Payment succeeds? Payment T2 capture → Order PAID; Booking unchanged
+Can Booking and Order temporarily have different lifecycle states? YES
+Which domain is authoritative for temporal state? Booking (sole)
+Which domain is authoritative for financial state? Order/Payment (sole)
+What transaction boundary is required? Booking creation = independent; Order creation = existing T1
+Is an outbox/event mechanism actually required? NO — synchronous T1 call from checkout endpoint
+What tenant invariant applies? Both tenant-scoped; link validated by tenantId
+
+ARCHITECTURAL CONSEQUENCE: Clean separation of concerns. Booking owns time; Order owns money.
+BUSINESS CONSEQUENCE: Enables monetization without coupling. Walk-in orders still work.
+SCHEMA/API IMPACT: 
+  - Booking: optional orderId FK (nullable, RESTRICT, P2003→409)
+  - Or additive BookingProvenance table (1:1, like PosSale)
+  - POST /bookings/:id/checkout (booking:manage + order:create)
+  - GET /bookings/:id/order (optional)
+FAILURE/RETRY: 
+  - Booking creation: EXCLUDE/P2002 handles duplicates
+  - Order creation: T5 idempotency (no CAPTURED) + client idempotency key if needed
+  - Checkout retry: Booking already exists → idempotent link creation
+WHAT REMAINS DEFERRED: Payment timing (C3), refunds (C5), pricing (C6), inventory (C7)
+
+
+MODEL C: Booking creation synchronously creates an Order
+------------------------------------------------------------------
+Booking creation directly creates Order (+ Payment) in same transaction.
+
+Who creates Booking?          Customer/Staff via Booking API
+Who creates Order?            Booking service (same transaction)
+Can Booking exist without Order? NO (always paired)
+Can Order exist without Booking? YES (walk-in, POS)
+Can one Order represent multiple Bookings? NO (1:1 enforced by schema)
+What happens if Order creation fails? Booking rolls back; client sees 409/500
+What happens on request retry? Booking retry + Order retry in same tx
+What happens on concurrent requests? Both protected by same transaction
+What happens when Booking is cancelled? Both roll back or Order CANCELLED + restock
+What happens when Order is cancelled? Both CANCELLED + restock
+What happens when Payment fails? Order stays PENDING; Booking unaffected
+What happens when Payment succeeds? Both committed
+Can Booking and Order temporarily have different lifecycle states? NO (atomic)
+Which domain is authoritative for temporal state? Both (coupled)
+Which domain is authoritative for financial state? Order (but coupled)
+What transaction boundary is required? Single transaction spanning Booking + Order + Payment
+Is an outbox/event mechanism actually required? NO (synchronous)
+What tenant invariant applies? Both tenant-scoped; same tenantId enforced
+
+ARCHITECTURAL CONSEQUENCE: Tight coupling. Booking service must know Order/Payment logic.
+BUSINESS CONSEQUENCE: Every booking requires payment flow. No walk-in bookings.
+SCHEMA/API IMPACT: Booking.create becomes Order.create; atomicity required.
+FAILURE/RETRY: Single transaction — either both succeed or both fail.
+WHAT REMAINS DEFERRED: Nothing — all decisions forced at booking time.
+
+
+MODEL D: Order references Booking instead
+-----------------------------------------
+Order optionally references a Booking (reverse provenance, like PosSale).
+
+Who creates Booking?          Customer/Staff via Booking API
+Who creates Order?            Later (checkout, POS) via existing T1
+Can Booking exist without Order? YES (always)
+Can Order exist without Booking? YES (walk-in, POS)
+Can one Order represent multiple Bookings? YES (1:N — Order references Booking)
+What happens if Order creation fails? Booking unaffected
+What happens on request retry? Order retry via T5; Booking unaffected
+What happens on concurrent requests? Booking EXCLUDE; Order T1/T5 guards
+What happens when Booking is cancelled? Booking CANCELLED; Order unchanged
+What happens when Order is cancelled? Order T3; Booking unchanged
+What happens when Payment fails? Payment FAILED; Order PENDING; Booking unchanged
+What happens when Payment succeeds? Order PAID; Booking unchanged
+Can Booking and Order temporarily have different lifecycle states? YES
+Which domain is authoritative for temporal state? Booking
+Which domain is authoritative for financial state? Order
+What transaction boundary is required? Independent (Booking first, Order later)
+Is an outbox/event mechanism actually required? NO
+What tenant invariant applies? Both tenant-scoped; link validated by tenantId
+
+ARCHITECTURAL CONSEQUENCE: Clean separation. Order is commerce root.
+BUSINESS CONSEQUENCE: Supports 1:N (multiple bookings → one order) and walk-ins.
+SCHEMA/API IMPACT: Order.bookingId (nullable FK, RESTRICT); Booking unaware.
+FAILURE/RETRY: Order creation independent; Booking already exists.
+WHAT REMAINS DEFERRED: All payment/refund/inventory decisions.
+
+
+=======================================================================
+2. PAYMENT ANALYSIS — DOES P5-U5 NEED TO CHANGE PAYMENT?
+=======================================================================
+
+REPOSITORY FACT: Payment state machine is FROZEN (Phase 3 U7, Phase 4 U7 verified):
+- States: PROCESSING → CAPTURED | FAILED (terminal, immutable)
+- T5: create PROCESSING for PENDING Order, no existing CAPTURED
+- T2 capture: guarded PROCESSING→CAPTURED + Order PENDING→PAID (atomic)
+- T2 fail: PROCESSING→FAILED; Order untouched
+- Idempotent: re-capture CAPTURED = 200 no-op; re-fail FAILED = 200 no-op
+- No refunds anywhere (Phase 3 §7, Phase 4: no refunds)
+
+EXISTING INVARIANT: Payment only knows Order. No Booking reference.
+Payment amount/currency derived from Order (full-amount invariant).
+
+INFERENCE: P5-U5 does NOT need to change Payment UNLESS:
+- C3 decision = "Prepay" (Payment before Booking) → requires Payment before Booking
+- C5 decision = "Refund via Payment" → requires new refund state/transition
+- C3 decision = "At booking" → Payment created at Booking time
+
+REPOSITORY FACT: Current Payment supports CASH/CARD methods; amount/currency
+derived from Order. No Booking reference.
+
+INFERENCE: For Architecture A/B (optional link), Payment needs ZERO changes.
+Order already derives amount/currency. Booking→Order link is additive.
+
+PROPOSED DECISION: Payment remains UNCHANGED in P5-U5.
+- No new states (no REFUND, no PARTIAL_REFUND, no BOOKING_*)
+- No Booking reference in Payment
+- Order remains the sole financial aggregate
+- If refunds ever needed (B19), that is a separate Phase 5+ decision
+
+BUSINESS CONSEQUENCE: Payment remains a pure Order concern. Booking integration
+is purely provenance. No refund logic in P5-U5.
+
+FAILURE/RETRY: Existing Payment idempotency (re-capture/re-fail = 200 no-op)
+sufficient. No new retry logic needed.
+
+WHAT REMAINS DEFERRED: B19 (refunds), B18 (payment timing if C3 changes).
+
+
+=======================================================================
+3. PRICING ANALYSIS — DOES BOOKING NEED A PRICE?
+=======================================================================
+
+REPOSITORY FACT: Existing pricing architecture (Phase 3 U1-U3, P5-U1):
+- Product/Variant/Price: Variant 1-N Price (variantId, currency, amountMinor)
+- @@unique([variantId, currency]) — one CURRENT price per pair; upsert overwrites
+- OrderItem snapshots price at creation (unitAmountMinor, currency, snapshots)
+- Service (P5-U1): NO pricing fields (B23 = NO pricing). NO duration (B5).
+- Price is live on Variant; OrderItem snapshots at creation.
+
+INFERENCE: Service has NO price. Booking references Service, not Variant.
+If pricing is needed for P5-U5, the canonical source is Variant→Price.
+
+OPTIONS FOR C6 (PRICING):
+1. No pricing (P5-U5 defers entirely) — Booking free/zero; Order pricing handled at Order level
+2. Flat per-service price — add price columns to Service or ServicePrice table
+3. Per-duration pricing — requires B5 (duration field) + duration calculation
+4. Per-staff pricing — requires B1=Option B + B16 (staff model)
+5. Dynamic pricing — new domain entirely
+
+REPOSITORY FACT: Order amount derived from Variant→Price at T1. OrderItem
+snapshots price. Service has NO Price relation (B23 = NO pricing in P5-U1).
+
+INFERENCE: For Architecture A (Service-Catalog), Service has no price.
+Order gets price from Variant→Price. Booking references Service, not Variant.
+Therefore: Booking CANNOT have a price unless:
+- Service gets a Price relation (additive, B23 decision), OR
+- Booking references Variant instead of Service (architecture change), OR
+- Pricing is entirely at Order level (Booking = free, Order pays)
+
+REPOSITORY FACT: P5-U1 explicitly implemented B23 = NO pricing. Service has
+no price columns. Price table only links to Variant.
+
+INFERENCE: For P5-U5 minimum scope, PRICING = NONE (Option 1). Booking is
+free/temporal. Order pays via existing Variant→Price at T1.
+
+If C6 = "Flat per-service price" is chosen later:
+- Requires B23 decision (Service pricing model)
+- Additive ServicePrice table or inline columns
+- Order T1 would need to resolve Service→Price instead of Variant→Price
+- This is a B23 decision, NOT a P5-U5 decision
+
+PROPOSED DECISION: C6 = "No pricing in P5-U5". Booking has no price.
+Order pricing remains via Variant→Price at T1. B23 decision is separate.
+
+BUSINESS CONSEQUENCE: Booking is purely temporal. Monetization happens at
+Order creation (existing T1). No duplicate pricing state.
+
+WHAT REMAINS DEFERRED: B23 (Service pricing model), C6 if not "None".
+
+
+=======================================================================
+4. INVENTORY ANALYSIS — SHOULD BOOKING INTERACT WITH INVENTORY?
+=======================================================================
+
+REPOSITORY FACT: Inventory model (Phase 3 U4, P4-U3):
+- Pools: global (storeId NULL) + store-scoped (storeId set)
+- Guarded updateMany with quantityOnHand >= needed
+- DB CHECK quantityOnHand >= 0
+- Decrement-on-order / restock-on-cancel via Order T1/T3
+- POS sales consume store-scoped pool via PosSale provenance
+- NO inventory link to services (B20 unresolved)
+
+INFERENCE: Service booking is TEMPORAL (time-based). Inventory is QUANTITY-based
+(goods). These are fundamentally different scarcity models:
+- Goods: quantity consumed, restocked, tracked per variant
+- Services: time slots consumed, tracked per service+time (EXCLUDE constraint)
+
+INFERENCE: For Architecture A (Service-Catalog), service time slots are
+protected by EXCLUDE constraint on (serviceId, tstzrange). This IS the
+service's "inventory" — time capacity. No goods inventory consumed.
+
+PROPOSED DECISION: C7 = "No consumption". Booking does NOT interact with
+Inventory. Service time capacity is enforced by EXCLUDE constraint.
+
+BUSINESS CONSEQUENCE: Service bookings don't consume goods stock. If a
+service consumes materials (e.g., hair dye), that is a B20 decision for
+later phase (post-P5-U4), not P5-U5.
+
+WHAT REMAINS DEFERRED: B20 (inventory consumption) — default "none" for P5-U5.
+
+
+=======================================================================
+5. CANCELLATION / REFUND — TRUTH TABLE
+=======================================================================
+
+Booking Status          | Order Status      | Payment Status    | Valid? | Notes
+------------------------|-------------------|-------------------|--------|-------
+BOOKED                  | (none)            | (none)            | ✅     | Booking only, no Order
+BOOKED                  | PENDING           | PROCESSING        | ✅     | Normal flow
+BOOKED                  | PENDING           | CAPTURED          | ❌     | Impossible: CAPTURED → Order PAID
+BOOKED                  | PAID              | CAPTURED          | ❌     | Impossible: CAPTURED → Order PAID
+CONFIRMED               | (none)            | (none)            | ✅     | 
+CONFIRMED               | PENDING           | PROCESSING        | ✅     |
+CONFIRMED               | PAID              | CAPTURED          | ✅     | Paid but not yet started
+ACTIVE                  | (none)            | (none)            | ✅     | In progress
+ACTIVE                  | PAID              | CAPTURED          | ✅     | Paid, in progress
+COMPLETED               | PAID              | CAPTURED          | ✅     | Normal completion
+COMPLETED               | CANCELLED         | CAPTURED          | ⚠️     | Temporarily inconsistent — compensation needed
+CANCELLED               | (none)            | (none)            | ✅     | Booking cancelled, no Order
+CANCELLED               | CANCELLED         | PROCESSING        | ✅     | Both cancelled
+CANCELLED               | CANCELLED         | FAILED            | ✅     | Payment failed, both cancelled
+CANCELLED               | PAID              | CAPTURED          | ⚠️     | Compensation: refund needed (B19)
+NO_SHOW                 | PAID              | CAPTURED          | ⚠️     | Compensation: refund/credit needed (B19)
+NO_SHOW                 | CANCELLED         | FAILED            | ✅     | Both failed
+
+LEGEND: ✅ = Valid steady state | ⚠️ = Temporarily inconsistent, requires compensation | ❌ = Invalid combination
+
+COMPENSATION REQUIRED (B19 decisions):
+- Booking CANCELLED + Order PAID + Payment CAPTURED → Refund via Payment (B19)
+- Booking NO_SHOW + Order PAID + Payment CAPTURED → Refund/credit (B19)
+- Booking COMPLETED + Order CANCELLED → Restock handled by Order T3, but Booking COMPLETED → mismatch
+
+EXISTING INVARIANT: No refunds anywhere (Phase 3, Phase 4). B19 = "no refunds unless explicitly approved".
+
+RECOMMENDED: P5-U5 implements cancellation as STATUS ONLY (Booking CANCELLED).
+Order cancellation (if linked) uses existing T3. NO refund logic in P5-U5.
+B19 decision is separate Phase 5+ decision.
+
+WHAT REMAINS DEFERRED: B19 (refunds), C4/C5 if refunds approved.
+
+
+=======================================================================
+6. IDEMPOTENCY ANALYSIS
+=======================================================================
+
+REPOSITORY FACT: Existing idempotency patterns:
+1. EXCLUDE constraint (Booking, Reservation) — DB-authoritative, zero app logic
+2. Guarded updateMany + client idempotency key (PosOperation) — dedup at sync
+
+BOOKING CREATION: Already idempotent via EXCLUDE (serviceId + startAt).
+Concurrent duplicate → exactly [201, 409], exactly one row.
+
+ORDER CREATION (T1): Not naturally idempotent (no natural key). T5 allows
+multiple PROCESSING payments; Order has no natural dedup key.
+
+INFERENCE: For Booking→Order link, the ONLY operation needing new idempotency
+is "create Order from Booking" (checkout). This is a synchronous API call.
+
+OPTIONS FOR C8:
+1. Natural key: BookingId as idempotency key (BookingId unique per tenant)
+2. Client key: Client-generated idempotency key (PosOperation pattern)
+3. None: rely on Booking existence check (Booking already exists → return existing Order)
+
+REPOSITORY FACT: PosSale pattern uses no client key — PosOperation dedup
+via (deviceId, clientUuid). Order T5 allows multiple PROCESSING payments.
+
+INFERENCE: For "checkout" operation, the natural idempotency key is
+BookingId (already unique per tenant). If Booking already has Order → return
+existing Order (idempotent). No client key needed.
+
+PROPOSED DECISION: C8 = "Natural key (BookingId)". Checkout is idempotent
+by checking existing Booking.orderId. No client key required.
+
+BUSINESS CONSEQUENCE: Simple, no client changes. Retry-safe.
+
+WHAT REMAINS DEFERRED: C8 if synchronous Booking+Order creation chosen
+(Model C) — then would need client key or natural key across both.
+
+
+=======================================================================
+7. TIMEZONE B10 — GOVERNANCE
+=======================================================================
+
+REPOSITORY FACT: 
+- Entire codebase is UTC-only (Phase 3, 4, 5)
+- Reservation: ISO-8601 UTC, tstzrange AT TIME ZONE 'UTC', half-open [start,end)
+- EXCLUDE constraint materializes ranges AT TIME ZONE 'UTC'
+- No IANA/locale concept anywhere
+- btree_gist already installed
+
+DECISION GATE §9 (phase5_decision_gate.txt): "Status: REQUIRES USER DECISION
+(before P5-U3; strongly supported: UTC-only per F9). SAFE TO DEFER beyond P5-U1."
+
+P5-U2 DECISION GATE §16: "B10 — Timezone: UTC-only (strongly supported by F9)
+or per-store business timezone? Must be resolved before P5-U3 but should
+be acknowledged now."
+
+P5-U5 DISCOVERY: "B10 — Timezone — UTC-only (F9 evidence) or per-store
+business tz? Must be resolved before P5-U3 but should be acknowledged now."
+
+P5-U5 DEPENDENCY: Does P5-U5 actually depend on business timezone?
+- Booking stores startAt/endAt as UTC DateTime
+- EXCLUDE constraint uses AT TIME ZONE 'UTC'
+- All comparisons are UTC instants
+- Display/UX timezone is a presentation concern (client-side)
+
+INFERENCE: P5-U5 does NOT depend on business timezone. The temporal model
+is UTC-only end-to-end. Display-timezone is a client-side concern.
+
+PROPOSED DECISION: B10 = "UTC-only (implementation convention, not business decision)".
+Acknowledge as implementation detail. Defer business timezone decision to P5-U3
+(where availability/schedules would need it).
+
+BUSINESS CONSEQUENCE: None for P5-U5. All temporal operations remain UTC.
+
+WHAT REMAINS DEFERRED: B10 for P5-U3 (availability/schedules).
+
+
+=======================================================================
+8. MODEL-BY-MODEL SUMMARY: RECOMMENDATIONS
+=======================================================================
+
+| Decision | Recommendation | Label |
+|----------|----------------|-------|
+| C1       | Option B (Optional FK Booking→Order, nullable, RESTRICT, P2003→409) | ARCHITECTURALLY RECOMMENDED |
+| C2       | "Later checkout" (Order created later via POS/checkout, not at Booking) | ARCHITECTURALLY RECOMMENDED |
+| C3       | Out of scope for P5-U5 (payment at Order level) | ARCHITECTURALLY RECOMMENDED |
+| C4       | Status only (Booking CANCELLED; Order uses existing T3 if linked) | ARCHITECTURALLY RECOMMENDED |
+| C5       | None (no refunds; B19 deferred) | ARCHITECTURALLY RECOMMENDED |
+| C6       | None (pricing at Order via Variant→Price; Service has no price) | ARCHITECTURALLY RECOMMENDED |
+| C7       | No consumption (EXCLUDE protects service time; Inventory is for goods) | ARCHITECTURALLY RECOMMENDED |
+| C8       | Natural key (BookingId) — checkout idempotent via Booking existence | ARCHITECTURALLY RECOMMENDED |
+| B10      | UTC-only (implementation convention; presentation-timezone deferred) | ARCHITECTURALLY RECOMMENDED |
+
+=======================================================================
+9. RECOMMENDED DECISION SET
+=======================================================================
+
+C1 = Option B (Optional FK Booking→Order, nullable, RESTRICT, P2003→409)
+    Label: ARCHITECTURALLY RECOMMENDED
+
+C2 = "Later checkout" (Order created later via POS/checkout, not at Booking)
+    Label: ARCHITECTURALLY RECOMMENDED
+
+C3 = Out of scope for P5-U5 (payment timing at Order level)
+    Label: ARCHITECTURALLY RECOMMENDED
+
+C4 = Status only (Booking CANCELLED; Order uses existing T3 if linked)
+    Label: ARCHITECTURALLY RECOMMENDED
+
+C5 = None (no refunds; B19 deferred)
+    Label: ARCHITECTURALLY RECOMMENDED
+
+C6 = None (pricing at Order via Variant→Price; Service has no price)
+    Label: ARCHITECTURALLY RECOMMENDED
+
+C7 = No consumption (EXCLUDE protects service time; Inventory is for goods)
+    Label: ARCHITECTURALLY RECOMMENDED
+
+C8 = Natural key (BookingId) — checkout idempotent via Booking existence
+    Label: ARCHITECTURALLY RECOMMENDED
+
+B10 = UTC-only (implementation convention; presentation-timezone deferred)
+    Label: ARCHITECTURALLY RECOMMENDED
+
+=======================================================================
+10. MINIMUM P5-U5 IMPLEMENTATION SCOPE IF APPROVED
+=======================================================================
+
+1. Schema: Add optional `orderId` FK to Booking (nullable, RESTRICT, P2003→409).
+   OR additive `BookingProvenance` table (Booking 1-1 Order, like PosSale).
+
+2. API: POST /bookings/:id/checkout → creates Order (T1) + links to Booking.
+   Requires booking:manage + order:create.
+
+3. Optional: GET /bookings/:id/order → returns linked Order.
+
+4. NO Payment/Pricing/Inventory/Refund logic in Booking module.
+
+5. RBAC: booking:manage + order:create for checkout.
+
+Migration: One additive handwritten SQL migration at next slot.
+Booking table ALTER (orderId) + FK, or new BookingProvenance table.
+
+Files created:
+- prisma/migrations/20260821190000_add_booking_order_link/migration.sql
+- src/booking/dto/booking-checkout.dto.ts / .spec.ts
+- src/booking/booking.service.ts (checkout method)
+- src/booking/booking.controller.ts (checkout endpoint)
+- src/booking/booking.integration.spec.ts (checkout tests)
+
+Tests: idempotent checkout, concurrent checkout, RBAC, IDOR, validation.
+
+=======================================================================
+11. FEATURES THAT MUST NOT BE IMPLEMENTED IN P5-U5
+=======================================================================
+
+- Pricing fields on Service/Booking (B23 deferred)
+- Duration field on Service/Booking (B5 deferred)
+- Staff/Provider/Resource models (B16 collapsed)
+- Availability/Schedule/Slot/Calendar (B4/B8 deferred to P5-U3)
+- Pricing fields on Booking/Service (B23/B5 deferred)
+- Payment timing logic (C3 — Out of scope)
+- Refund logic (C5/B19 deferred)
+- Inventory consumption (C7 = None)
+- Duration field on Service/Booking (B5 deferred)
+- Store-scoped Service/Booking (B11/B12 confirmed)
+- Customer-store membership (B14 sub-option i confirmed)
+- Delete endpoint (soft-retirement via CANCELLED status)
+- Refund logic (B19 deferred)
+- New Payment states (REFUND, PARTIAL_REFUND)
+- Booking-specific Payment states
+- Staff/Provider/Resource models
+- Schedule/Calendar/Availability models
+
+=======================================================================
+12. EXPLICIT STATEMENT
+=======================================================================
+NO production implementation was performed during this decision review.
+No Booking↔Order links, pricing fields, payment triggers, inventory
+consumption, refund logic, staff models, availability models, or
+schedule models were created. No schema changes, migrations, APIs,
+DTOs, RBAC keys, or tests were created. The only artifacts are this
+report and the decision-review checkpoint entry in docs/phase-progress.md.
+
+=======================================================================
+END OF DECISION REVIEW
+=======================================================================
