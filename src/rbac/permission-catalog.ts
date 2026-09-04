@@ -426,8 +426,7 @@ export const PERMISSION_DEFINITIONS: readonly PermissionDefinition[] = [
     key: PERMISSIONS.BOOKING_MANAGE,
     name: 'Manage bookings',
     category: PERMISSION_CATEGORIES.BOOKINGS,
-    description:
-      'Update and cancel service bookings in the tenant',
+    description: 'Update and cancel service bookings in the tenant',
   },
   {
     key: PERMISSIONS.MEMBER_READ,

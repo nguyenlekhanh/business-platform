@@ -1,5 +1,12 @@
 ﻿import { ConflictException, NotFoundException } from '@nestjs/common';
-import type { Booking, BookingStatus, Service, ServiceStatus, Customer, CustomerStatus } from '@prisma/client';
+import type {
+  Booking,
+  BookingStatus,
+  Service,
+  ServiceStatus,
+  Customer,
+  CustomerStatus,
+} from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { BookingService, BookingSummary } from './booking.service';
 
@@ -13,7 +20,7 @@ const mockService: Service = {
   tenantId,
   name: 'Test Service',
   description: null,
-  status: 'ACTIVE' as ServiceStatus,
+  status: 'ACTIVE',
   createdAt: new Date(),
   updatedAt: new Date(),
 };
@@ -26,7 +33,7 @@ const mockCustomer: Customer = {
   email: null,
   phone: null,
   notes: null,
-  status: 'ACTIVE' as CustomerStatus,
+  status: 'ACTIVE',
   createdAt: new Date(),
   updatedAt: new Date(),
 };
@@ -38,7 +45,7 @@ const mockBooking: Booking = {
   customerId,
   startAt: new Date('2026-09-02T10:00:00.000Z'),
   endAt: new Date('2026-09-02T11:00:00.000Z'),
-  status: 'BOOKED' as BookingStatus,
+  status: 'BOOKED',
   createdAt: new Date(),
   updatedAt: new Date(),
 };
@@ -75,7 +82,11 @@ describe('BookingService', () => {
 
   describe('assertTenantContext', () => {
     it('throws when tenant context is missing', () => {
-      const badContext = { requireTenantId: () => { throw new Error('No tenant'); } };
+      const badContext = {
+        requireTenantId: () => {
+          throw new Error('No tenant');
+        },
+      };
       const badService = new BookingService(
         mockPrisma as unknown as PrismaService,
         badContext as unknown as TenantContextService,
@@ -87,8 +98,16 @@ describe('BookingService', () => {
   describe('listBookings', () => {
     it('composes keyset pagination with status filter', async () => {
       mockPrisma.booking.findMany.mockResolvedValue([
-        { ...mockBooking, id: 'b1', startAt: new Date('2026-09-02T10:00:00.000Z') },
-        { ...mockBooking, id: 'b2', startAt: new Date('2026-09-02T12:00:00.000Z') },
+        {
+          ...mockBooking,
+          id: 'b1',
+          startAt: new Date('2026-09-02T10:00:00.000Z'),
+        },
+        {
+          ...mockBooking,
+          id: 'b2',
+          startAt: new Date('2026-09-02T12:00:00.000Z'),
+        },
       ]);
 
       const result = await service.listBookings({
@@ -116,7 +135,7 @@ describe('BookingService', () => {
 
       const callArgs = mockPrisma.booking.findMany.mock.calls[0][0];
       expect(callArgs.where.AND).toContainEqual(
-        expect.objectContaining({ serviceId: 'svc-1', customerId: 'cust-1' })
+        expect.objectContaining({ serviceId: 'svc-1', customerId: 'cust-1' }),
       );
     });
 
@@ -124,7 +143,7 @@ describe('BookingService', () => {
       const booking = { ...mockBooking, id: 'proj-1' };
       mockPrisma.booking.findMany.mockResolvedValue([booking]);
 
-      const result = await service.listBookings({} as any);
+      const result = await service.listBookings({});
 
       expect(result.data[0]).toEqual({
         id: booking.id,
@@ -140,12 +159,18 @@ describe('BookingService', () => {
     });
 
     it('fails closed when tenant context missing', async () => {
-      const badContext = { requireTenantId: () => { throw new Error('No tenant'); } };
+      const badContext = {
+        requireTenantId: () => {
+          throw new Error('No tenant');
+        },
+      };
       const badService = new BookingService(
         mockPrisma as unknown as PrismaService,
         badContext as unknown as TenantContextService,
       );
-      await expect(badService.listBookings({} as any)).rejects.toThrow('No tenant');
+      await expect(badService.listBookings({} as any)).rejects.toThrow(
+        'No tenant',
+      );
     });
   });
 
@@ -171,16 +196,24 @@ describe('BookingService', () => {
     it('throws 404 when booking not found', async () => {
       mockPrisma.booking.findUnique.mockResolvedValue(null);
 
-      await expect(service.getBooking(bookingId)).rejects.toThrow(NotFoundException);
+      await expect(service.getBooking(bookingId)).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
     it('fails closed when tenant context missing', async () => {
-      const badContext = { requireTenantId: () => { throw new Error('No tenant'); } };
+      const badContext = {
+        requireTenantId: () => {
+          throw new Error('No tenant');
+        },
+      };
       const badService = new BookingService(
         mockPrisma as unknown as PrismaService,
         badContext as unknown as TenantContextService,
       );
-      await expect(badService.getBooking(bookingId)).rejects.toThrow('No tenant');
+      await expect(badService.getBooking(bookingId)).rejects.toThrow(
+        'No tenant',
+      );
     });
   });
 
@@ -194,7 +227,12 @@ describe('BookingService', () => {
     };
 
     it('creates booking with BOOKED default when status omitted', async () => {
-      const dto = { serviceId, customerId, startAt: createDto.startAt, endAt: createDto.endAt };
+      const dto = {
+        serviceId,
+        customerId,
+        startAt: createDto.startAt,
+        endAt: createDto.endAt,
+      };
       mockPrisma.service.findUnique.mockResolvedValue(mockService);
       mockPrisma.customer.findUnique.mockResolvedValue(mockCustomer);
       mockPrisma.booking.create.mockResolvedValue({
@@ -203,7 +241,7 @@ describe('BookingService', () => {
         status: 'BOOKED',
       });
 
-      const result = await service.createBooking(dto as any);
+      const result = await service.createBooking(dto);
 
       expect(mockPrisma.booking.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -234,7 +272,7 @@ describe('BookingService', () => {
         status: 'CONFIRMED',
       });
 
-      const result = await service.createBooking(explicitDto as any);
+      const result = await service.createBooking(explicitDto);
 
       expect(mockPrisma.booking.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -245,7 +283,11 @@ describe('BookingService', () => {
     });
 
     it('omits customerId when not provided (walk-in)', async () => {
-      const dto = { serviceId, startAt: createDto.startAt, endAt: createDto.endAt };
+      const dto = {
+        serviceId,
+        startAt: createDto.startAt,
+        endAt: createDto.endAt,
+      };
       mockPrisma.service.findUnique.mockResolvedValue(mockService);
       mockPrisma.booking.create.mockResolvedValue({
         ...mockBooking,
@@ -253,7 +295,7 @@ describe('BookingService', () => {
         customerId: null,
       });
 
-      const result = await service.createBooking(dto as any);
+      const result = await service.createBooking(dto);
 
       expect(mockPrisma.customer.findUnique).not.toHaveBeenCalled();
       expect(mockPrisma.booking.create).toHaveBeenCalledWith(
@@ -267,14 +309,21 @@ describe('BookingService', () => {
     it('validates service exists', async () => {
       mockPrisma.service.findUnique.mockResolvedValue(null);
 
-      await expect(service.createBooking(createDto as any)).rejects.toThrow(NotFoundException);
+      await expect(service.createBooking(createDto as any)).rejects.toThrow(
+        NotFoundException,
+      );
       expect(mockPrisma.booking.create).not.toHaveBeenCalled();
     });
 
     it('validates service is ACTIVE', async () => {
-      mockPrisma.service.findUnique.mockResolvedValue({ ...mockService, status: 'DRAFT' });
+      mockPrisma.service.findUnique.mockResolvedValue({
+        ...mockService,
+        status: 'DRAFT',
+      });
 
-      await expect(service.createBooking(createDto as any)).rejects.toThrow(ConflictException);
+      await expect(service.createBooking(createDto as any)).rejects.toThrow(
+        ConflictException,
+      );
       expect(mockPrisma.booking.create).not.toHaveBeenCalled();
     });
 
@@ -282,26 +331,39 @@ describe('BookingService', () => {
       mockPrisma.service.findUnique.mockResolvedValue(mockService);
       mockPrisma.customer.findUnique.mockResolvedValue(null);
 
-      await expect(service.createBooking(createDto as any)).rejects.toThrow(NotFoundException);
+      await expect(service.createBooking(createDto as any)).rejects.toThrow(
+        NotFoundException,
+      );
       expect(mockPrisma.booking.create).not.toHaveBeenCalled();
     });
 
     it('maps P2002/P2003 (overlap) to 409', async () => {
       mockPrisma.service.findUnique.mockResolvedValue(mockService);
       mockPrisma.customer.findUnique.mockResolvedValue(mockCustomer);
-      const error = new Prisma.PrismaClientKnownRequestError('Overlap', { code: 'P2002', clientVersion: '6.19.3' });
+      const error = new Prisma.PrismaClientKnownRequestError('Overlap', {
+        code: 'P2002',
+        clientVersion: '6.19.3',
+      });
       mockPrisma.booking.create.mockRejectedValue(error);
 
-      await expect(service.createBooking(createDto as any)).rejects.toThrow(ConflictException);
+      await expect(service.createBooking(createDto as any)).rejects.toThrow(
+        ConflictException,
+      );
     });
 
     it('fails closed when tenant context missing', async () => {
-      const badContext = { requireTenantId: () => { throw new Error('No tenant'); } };
+      const badContext = {
+        requireTenantId: () => {
+          throw new Error('No tenant');
+        },
+      };
       const badService = new BookingService(
         mockPrisma as unknown as PrismaService,
         badContext as unknown as TenantContextService,
       );
-      await expect(badService.createBooking(createDto as any)).rejects.toThrow('No tenant');
+      await expect(badService.createBooking(createDto as any)).rejects.toThrow(
+        'No tenant',
+      );
     });
   });
 
@@ -319,7 +381,7 @@ describe('BookingService', () => {
         status: 'CONFIRMED',
       });
 
-      const result = await service.updateBooking(bookingId, updateDto as any);
+      const result = await service.updateBooking(bookingId, updateDto);
 
       expect(mockPrisma.booking.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -347,45 +409,67 @@ describe('BookingService', () => {
     it('throws 404 when booking not found', async () => {
       mockPrisma.booking.findUnique.mockResolvedValue(null);
 
-      await expect(service.updateBooking(bookingId, updateDto as any)).rejects.toThrow(NotFoundException);
+      await expect(
+        service.updateBooking(bookingId, updateDto as any),
+      ).rejects.toThrow(NotFoundException);
     });
 
     it('validates service exists and is ACTIVE when changing', async () => {
       mockPrisma.booking.findUnique.mockResolvedValue(mockBooking);
       mockPrisma.service.findUnique.mockResolvedValue(null);
 
-      await expect(service.updateBooking(bookingId, { serviceId: 'svc-999' } as any)).rejects.toThrow(NotFoundException);
+      await expect(
+        service.updateBooking(bookingId, { serviceId: 'svc-999' } as any),
+      ).rejects.toThrow(NotFoundException);
     });
 
     it('validates service is ACTIVE when changing', async () => {
       mockPrisma.booking.findUnique.mockResolvedValue(mockBooking);
-      mockPrisma.service.findUnique.mockResolvedValue({ ...mockService, status: 'DRAFT' });
+      mockPrisma.service.findUnique.mockResolvedValue({
+        ...mockService,
+        status: 'DRAFT',
+      });
 
-      await expect(service.updateBooking(bookingId, { serviceId: 'svc-999' } as any)).rejects.toThrow(ConflictException);
+      await expect(
+        service.updateBooking(bookingId, { serviceId: 'svc-999' } as any),
+      ).rejects.toThrow(ConflictException);
     });
 
     it('validates customer exists when provided', async () => {
       mockPrisma.booking.findUnique.mockResolvedValue(mockBooking);
       mockPrisma.customer.findUnique.mockResolvedValue(null);
 
-      await expect(service.updateBooking(bookingId, { customerId: 'cust-999' } as any)).rejects.toThrow(NotFoundException);
+      await expect(
+        service.updateBooking(bookingId, { customerId: 'cust-999' } as any),
+      ).rejects.toThrow(NotFoundException);
     });
 
     it('maps P2002/P2003 (overlap) to 409', async () => {
       mockPrisma.booking.findUnique.mockResolvedValue(mockBooking);
-      const error = new Prisma.PrismaClientKnownRequestError('Overlap', { code: 'P2002', clientVersion: '6.19.3' });
+      const error = new Prisma.PrismaClientKnownRequestError('Overlap', {
+        code: 'P2002',
+        clientVersion: '6.19.3',
+      });
       mockPrisma.booking.update.mockRejectedValue(error);
 
-      await expect(service.updateBooking(bookingId, updateDto as any)).rejects.toThrow(ConflictException);
+      await expect(
+        service.updateBooking(bookingId, updateDto as any),
+      ).rejects.toThrow(ConflictException);
     });
 
     it('fails closed when tenant context missing', async () => {
-      const badContext = { requireTenantId: () => { throw new Error('No tenant'); } };
+      const badContext = {
+        requireTenantId: () => {
+          throw new Error('No tenant');
+        },
+      };
       const badService = new BookingService(
         mockPrisma as unknown as PrismaService,
         badContext as unknown as TenantContextService,
       );
-      await expect(badService.updateBooking(bookingId, updateDto as any)).rejects.toThrow('No tenant');
+      await expect(
+        badService.updateBooking(bookingId, updateDto as any),
+      ).rejects.toThrow('No tenant');
     });
   });
 });

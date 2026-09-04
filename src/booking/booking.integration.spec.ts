@@ -316,7 +316,13 @@ describe('Service-Catalog Booking (integration)', () => {
 
   const createBooking = async (
     headers: Record<string, string>,
-    data: { serviceId: string; customerId?: string; startAt: string; endAt: string; status?: string },
+    data: {
+      serviceId: string;
+      customerId?: string;
+      startAt: string;
+      endAt: string;
+      status?: string;
+    },
   ) => call('post', '/bookings', headers, data);
 
   const baseTime = new Date('2026-09-02T10:00:00.000Z');
@@ -327,17 +333,21 @@ describe('Service-Catalog Booking (integration)', () => {
       expect((await call('get', '/bookings/x', {})).status).toBe(401);
       expect(
         (
-          await call('post', '/bookings', {}, {
-            serviceId: serviceAId,
-            startAt: baseTime.toISOString(),
-            endAt: new Date(baseTime.getTime() + 3600000).toISOString(),
-          })
+          await call(
+            'post',
+            '/bookings',
+            {},
+            {
+              serviceId: serviceAId,
+              startAt: baseTime.toISOString(),
+              endAt: new Date(baseTime.getTime() + 3600000).toISOString(),
+            },
+          )
         ).status,
       ).toBe(401);
       expect(
-        (
-          await call('patch', '/bookings/x', {}, { status: 'CONFIRMED' })
-        ).status,
+        (await call('patch', '/bookings/x', {}, { status: 'CONFIRMED' }))
+          .status,
       ).toBe(401);
     });
 
@@ -419,9 +429,14 @@ describe('Service-Catalog Booking (integration)', () => {
       });
       expect(created.status).toBe(201);
       const bookingId = (created.body as BookingBody).id;
-      const patched = await call('patch', `/bookings/${bookingId}`, manageOnlyA, {
-        status: 'CONFIRMED',
-      });
+      const patched = await call(
+        'patch',
+        `/bookings/${bookingId}`,
+        manageOnlyA,
+        {
+          status: 'CONFIRMED',
+        },
+      );
       expect(patched.status).toBe(200);
       expect((await call('get', '/bookings', manageOnlyA)).status).toBe(403);
       expect(
@@ -515,9 +530,14 @@ describe('Service-Catalog Booking (integration)', () => {
         startAt: new Date(baseTime.getTime() + 7200000).toISOString(),
         endAt: new Date(baseTime.getTime() + 10800000).toISOString(),
       });
-      const ns = await call('patch', `/bookings/${(noShow.body as BookingBody).id}`, adminA, {
-        status: 'NO_SHOW',
-      });
+      const ns = await call(
+        'patch',
+        `/bookings/${(noShow.body as BookingBody).id}`,
+        adminA,
+        {
+          status: 'NO_SHOW',
+        },
+      );
       expect((ns.body as BookingBody).status).toBe('NO_SHOW');
     });
 
@@ -552,7 +572,11 @@ describe('Service-Catalog Booking (integration)', () => {
     it('rejects an overlapping booking for the same service with 409', async () => {
       const start = baseTime.toISOString();
       const end = new Date(baseTime.getTime() + 3600000).toISOString();
-      await createBooking(adminA, { serviceId: serviceAId, startAt: start, endAt: end });
+      await createBooking(adminA, {
+        serviceId: serviceAId,
+        startAt: start,
+        endAt: end,
+      });
       const overlap = await createBooking(adminA, {
         serviceId: serviceAId,
         startAt: start,
@@ -564,7 +588,9 @@ describe('Service-Catalog Booking (integration)', () => {
       );
       // Exactly one row exists.
       const count = await tenantContext.run(tenantAId, async () =>
-        prisma.booking.count({ where: { tenantId: tenantAId, serviceId: serviceAId } }),
+        prisma.booking.count({
+          where: { tenantId: tenantAId, serviceId: serviceAId },
+        }),
       );
       expect(count).toBe(1);
     });
@@ -573,25 +599,49 @@ describe('Service-Catalog Booking (integration)', () => {
       const t1 = baseTime.toISOString();
       const t2 = new Date(baseTime.getTime() + 3600000).toISOString();
       const t3 = new Date(baseTime.getTime() + 7200000).toISOString();
-      const b1 = await createBooking(adminA, { serviceId: serviceAId, startAt: t1, endAt: t2 });
+      const b1 = await createBooking(adminA, {
+        serviceId: serviceAId,
+        startAt: t1,
+        endAt: t2,
+      });
       expect(b1.status).toBe(201);
-      const b2 = await createBooking(adminA, { serviceId: serviceAId, startAt: t2, endAt: t3 });
+      const b2 = await createBooking(adminA, {
+        serviceId: serviceAId,
+        startAt: t2,
+        endAt: t3,
+      });
       expect(b2.status).toBe(201);
     });
 
     it('allows same time for different services', async () => {
       const start = baseTime.toISOString();
       const end = new Date(baseTime.getTime() + 3600000).toISOString();
-      await createBooking(adminA, { serviceId: serviceAId, startAt: start, endAt: end });
-      const b2 = await createBooking(adminA, { serviceId: serviceBId, startAt: start, endAt: end });
+      await createBooking(adminA, {
+        serviceId: serviceAId,
+        startAt: start,
+        endAt: end,
+      });
+      const b2 = await createBooking(adminA, {
+        serviceId: serviceBId,
+        startAt: start,
+        endAt: end,
+      });
       expect(b2.status).toBe(201);
     });
 
     it('allows same service at same time in different tenants', async () => {
       const start = baseTime.toISOString();
       const end = new Date(baseTime.getTime() + 3600000).toISOString();
-      await createBooking(adminA, { serviceId: serviceAId, startAt: start, endAt: end });
-      const b2 = await createBooking(adminB, { serviceId: serviceB_B_Id, startAt: start, endAt: end });
+      await createBooking(adminA, {
+        serviceId: serviceAId,
+        startAt: start,
+        endAt: end,
+      });
+      const b2 = await createBooking(adminB, {
+        serviceId: serviceB_B_Id,
+        startAt: start,
+        endAt: end,
+      });
       expect(b2.status).toBe(201);
     });
 
@@ -599,14 +649,27 @@ describe('Service-Catalog Booking (integration)', () => {
       const t1 = baseTime.toISOString();
       const t2 = new Date(baseTime.getTime() + 3600000).toISOString();
       const t3 = new Date(baseTime.getTime() + 7200000).toISOString();
-      const b1 = await createBooking(adminA, { serviceId: serviceAId, startAt: t1, endAt: t2 });
-      const b2 = await createBooking(adminA, { serviceId: serviceAId, startAt: t2, endAt: t3 });
-      expect(b1.status).toBe(201);
-      expect(b2.status).toBe(201);
-      const res = await call('patch', `/bookings/${(b2.body as BookingBody).id}`, adminA, {
+      const b1 = await createBooking(adminA, {
+        serviceId: serviceAId,
         startAt: t1,
+        endAt: t2,
+      });
+      const b2 = await createBooking(adminA, {
+        serviceId: serviceAId,
+        startAt: t2,
         endAt: t3,
       });
+      expect(b1.status).toBe(201);
+      expect(b2.status).toBe(201);
+      const res = await call(
+        'patch',
+        `/bookings/${(b2.body as BookingBody).id}`,
+        adminA,
+        {
+          startAt: t1,
+          endAt: t3,
+        },
+      );
       expect(res.status).toBe(409);
     });
 
@@ -614,13 +677,23 @@ describe('Service-Catalog Booking (integration)', () => {
       const start = baseTime.toISOString();
       const end = new Date(baseTime.getTime() + 3600000).toISOString();
       const [a, b] = await Promise.all([
-        createBooking(adminA, { serviceId: serviceAId, startAt: start, endAt: end }),
-        createBooking(adminA, { serviceId: serviceAId, startAt: start, endAt: end }),
+        createBooking(adminA, {
+          serviceId: serviceAId,
+          startAt: start,
+          endAt: end,
+        }),
+        createBooking(adminA, {
+          serviceId: serviceAId,
+          startAt: start,
+          endAt: end,
+        }),
       ]);
       const statuses = [a.status, b.status].sort();
       expect(statuses).toEqual([201, 409]);
       const count = await tenantContext.run(tenantAId, async () =>
-        prisma.booking.count({ where: { tenantId: tenantAId, serviceId: serviceAId } }),
+        prisma.booking.count({
+          where: { tenantId: tenantAId, serviceId: serviceAId },
+        }),
       );
       expect(count).toBe(1);
     });
@@ -638,7 +711,9 @@ describe('Service-Catalog Booking (integration)', () => {
       expect((await call('get', `/bookings/${bId}`, adminA)).status).toBe(404);
       expect(
         (
-          await call('patch', `/bookings/${bId}`, adminA, { status: 'CONFIRMED' })
+          await call('patch', `/bookings/${bId}`, adminA, {
+            status: 'CONFIRMED',
+          })
         ).status,
       ).toBe(404);
       // The foreign row is untouched.
@@ -677,8 +752,12 @@ describe('Service-Catalog Booking (integration)', () => {
       });
       const listA = await call('get', '/bookings', adminA);
       const listB = await call('get', '/bookings', adminB);
-      const idsA = ((listA.body as { data: BookingBody[] }).data || []).map((s) => s.id);
-      const idsB = ((listB.body as { data: BookingBody[] }).data || []).map((s) => s.id);
+      const idsA = ((listA.body as { data: BookingBody[] }).data || []).map(
+        (s) => s.id,
+      );
+      const idsB = ((listB.body as { data: BookingBody[] }).data || []).map(
+        (s) => s.id,
+      );
       expect(idsA.length).toBeGreaterThan(0);
       expect(idsB.length).toBeGreaterThan(0);
       expect(idsA.some((id) => idsB.includes(id))).toBe(false);
@@ -708,15 +787,21 @@ describe('Service-Catalog Booking (integration)', () => {
         {},
         { serviceId: 'not-a-uuid' },
         { serviceId: serviceAId, startAt: 'not-a-date' },
-        { serviceId: serviceAId, startAt: baseTime.toISOString(), endAt: 'not-a-date' },
-        { serviceId: serviceAId, startAt: baseTime.toISOString(), endAt: baseTime.toISOString() }, // end not > start (DB CHECK)
+        {
+          serviceId: serviceAId,
+          startAt: baseTime.toISOString(),
+          endAt: 'not-a-date',
+        },
+        {
+          serviceId: serviceAId,
+          startAt: baseTime.toISOString(),
+          endAt: baseTime.toISOString(),
+        }, // end not > start (DB CHECK)
       ];
       for (const payload of cases) {
-        expect(
-          (
-            await call('post', '/bookings', adminA, payload)
-          ).status,
-        ).toBe(400);
+        expect((await call('post', '/bookings', adminA, payload)).status).toBe(
+          400,
+        );
       }
     });
 
@@ -813,7 +898,9 @@ describe('Service-Catalog Booking (integration)', () => {
       // Create 4 bookings: 3 BOOKED + 1 CANCELLED.
       for (let i = 0; i < 3; i++) {
         const start = new Date(baseTime.getTime() + i * 3600000).toISOString();
-        const end = new Date(baseTime.getTime() + (i + 1) * 3600000).toISOString();
+        const end = new Date(
+          baseTime.getTime() + (i + 1) * 3600000,
+        ).toISOString();
         await createBooking(adminA, {
           serviceId: serviceAId,
           startAt: start,
@@ -857,14 +944,24 @@ describe('Service-Catalog Booking (integration)', () => {
       expect(bookedBody.data.length).toBeGreaterThanOrEqual(3);
 
       // ServiceId filter.
-      const svcFilter = await call('get', `/bookings?serviceId=${serviceAId}`, adminA);
+      const svcFilter = await call(
+        'get',
+        `/bookings?serviceId=${serviceAId}`,
+        adminA,
+      );
       const svcBody = svcFilter.body as { data: BookingBody[] };
       expect(svcBody.data.every((s) => s.serviceId === serviceAId)).toBe(true);
 
       // CustomerId filter.
-      const custFilter = await call('get', `/bookings?customerId=${customerAId}`, adminA);
+      const custFilter = await call(
+        'get',
+        `/bookings?customerId=${customerAId}`,
+        adminA,
+      );
       const custBody = custFilter.body as { data: BookingBody[] };
-      expect(custBody.data.every((s) => s.customerId === customerAId)).toBe(true);
+      expect(custBody.data.every((s) => s.customerId === customerAId)).toBe(
+        true,
+      );
 
       const badStatus = await call('get', '/bookings?status=INVALID', adminA);
       expect(badStatus.status).toBe(400);

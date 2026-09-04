@@ -94,4 +94,15 @@ export class BookingController {
   ): Promise<BookingSummary> {
     return this.bookingService.updateBooking(id, dto);
   }
+
+  @Get(':id/order')
+  @RequirePermission(PERMISSIONS.BOOKING_READ)
+  @ApiOperation({ summary: 'Get the Order linked to this Booking (if any)' })
+  async getOrder(@Param('id') id: string) {
+    const booking = await this.bookingService.getBooking(id);
+    if (!booking) {
+      return null;
+    }
+    return booking.orderId ? { orderId: booking.orderId } : null;
+  }
 }

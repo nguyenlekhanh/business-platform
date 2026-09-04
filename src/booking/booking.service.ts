@@ -16,6 +16,7 @@ import {
 } from '../common/pagination/paginate';
 import { DEFAULT_PAGE_SIZE } from '../common/pagination/pagination-query.dto';
 import { TenantContextService } from '../common/tenant-context/tenant-context.service';
+import { OrderService } from '../order/order.service';
 import {
   BookingListQueryDto,
   CreateBookingDto,
@@ -23,7 +24,8 @@ import {
 } from './dto/booking.dto';
 
 const BOOKING_NOT_FOUND = 'Booking not found';
-const OVERLAP_ERROR = 'Another booking for this service overlaps the requested time';
+const OVERLAP_ERROR =
+  'Another booking for this service overlaps the requested time';
 const SERVICE_NOT_FOUND = 'Service not found';
 const CUSTOMER_NOT_FOUND = 'Customer not found';
 const SERVICE_NOT_ACTIVE = 'Service is not active';
@@ -34,6 +36,7 @@ export interface BookingSummary {
   tenantId: string;
   serviceId: string;
   customerId: string | null;
+  orderId: string | null;
   startAt: Date;
   endAt: Date;
   status: Booking['status'];
@@ -74,6 +77,7 @@ export class BookingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenantContext: TenantContextService,
+    private readonly orderService: OrderService,
   ) {}
 
   /**
@@ -186,7 +190,7 @@ export class BookingService {
         },
       });
       return this.toSummary(booking);
-} catch (error) {
+    } catch (error) {
       if (this.isConflictError(error)) {
         throw new ConflictException(OVERLAP_ERROR);
       }
@@ -195,7 +199,6 @@ export class BookingService {
       }
       throw error;
     }
-    return this.toSummary(booking);
   }
 
   async updateBooking(
@@ -245,26 +248,37 @@ export class BookingService {
           ...(dto.startAt !== undefined
             ? { startAt: new Date(dto.startAt) }
             : {}),
-          ...(dto.endAt !== undefined
-            ? { endAt: new Date(dto.endAt) }
-            : {}),
+          ...(dto.endAt !== undefined ? { endAt: new Date(dto.endAt) } : {}),
           ...(dto.status !== undefined ? { status: dto.status } : {}),
         },
       });
       return this.toSummary(updated);
-} catch (error) {
+    } catch (error) {
       if (this.isConflictError(error)) {
         throw new ConflictException(OVERLAP_ERROR);
       }
       // Log unhandled errors for debugging
-      console.error('[BookingService] Unhandled error type:', error?.constructor?.name);
+      console.error(
+        '[BookingService] Unhandled error type:',
+        error?.constructor?.name,
+      );
       console.error('[BookingService] Unhandled error:', error);
       if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        console.error('[BookingService] Prisma error code:', error.code, error.meta);
+        console.error(
+          '[BookingService] Prisma error code:',
+          error.code,
+          error.meta,
+        );
       } else if (error instanceof Prisma.PrismaClientUnknownRequestError) {
-        console.error('[BookingService] Prisma unknown request error:', error.message);
+        console.error(
+          '[BookingService] Prisma unknown request error:',
+          error.message,
+        );
       } else if (error instanceof Prisma.PrismaClientValidationError) {
-        console.error('[BookingService] Prisma validation error:', error.message);
+        console.error(
+          '[BookingService] Prisma validation error:',
+          error.message,
+        );
       }
       throw error;
     }
@@ -295,6 +309,7 @@ export class BookingService {
       tenantId: booking.tenantId,
       serviceId: booking.serviceId,
       customerId: booking.customerId,
+      orderId: booking.orderId,
       startAt: booking.startAt,
       endAt: booking.endAt,
       status: booking.status,
@@ -303,11 +318,13 @@ export class BookingService {
     };
   }
 
-  private isConflictError(
-    error: unknown,
-  ): boolean {
+  private isConflictError(error: unknown): boolean {
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-      return error.code === 'P2002' || error.code === 'P2003' || error.code === 'P2004';
+      return (
+        error.code === 'P2002' ||
+        error.code === 'P2003' ||
+        error.code === 'P2004'
+      );
     }
     if (error instanceof Prisma.PrismaClientUnknownRequestError) {
       const msg = error.message.toLowerCase();
@@ -322,9 +339,7 @@ export class BookingService {
     return false;
   }
 
-  private isCheckConstraintViolation(
-    error: unknown,
-  ): boolean {
+  private isCheckConstraintViolation(error: unknown): boolean {
     if (error instanceof Prisma.PrismaClientUnknownRequestError) {
       const msg = error.message.toLowerCase();
       return (

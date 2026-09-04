@@ -140,6 +140,7 @@ export class PosSaleService {
     //    pricing + guarded stock decrement + snapshots). P4-U3: the sale
     //    consumes the STORE's pool (session -> device -> store), never the
     //    tenant-global pool and never a client-selected store.
+    // P5-U5: pass bookingId for optional Booking->Order provenance link
     const order = await this.orderService.createOrder(
       userId,
       {
@@ -148,6 +149,7 @@ export class PosSaleService {
           quantity: i.quantity,
         })),
         ...(dto.customerId !== undefined ? { customerId: dto.customerId } : {}),
+        ...(dto.bookingId !== undefined ? { bookingId: dto.bookingId } : {}),
       },
       { inventoryScope: { kind: 'store', storeId: session.storeId } },
     );

@@ -82,7 +82,7 @@ export class PosSaleItemDto {
 }
 
 /**
- * Online POS sale — Phase 4 P4-U2. Creates an Order via the existing Core
+ * Online POS sale — Phase 4 P4-U2 + Phase 5 P5-U5. Creates an Order via the existing Core
  * Commerce T1 (server pricing, guarded stock decrement, snapshots), a
  * Payment via the existing T5, links them to the POS context (session ->
  * device -> store, cashier = session opener), and — for CASH — captures
@@ -92,6 +92,7 @@ export class PosSaleItemDto {
  * (anonymous/walk-in sales are documented Phase 3 behavior: Order.customerId
  * is nullable). status/order/payment/device/store/cashier are never
  * client-writable.
+ * bookingId optional (P5-U5): link this POS sale to an existing Booking.
  */
 export class CreatePosSaleDto {
   @IsString()
@@ -112,6 +113,10 @@ export class CreatePosSaleDto {
   @IsString()
   @IsNotEmpty()
   customerId?: string;
+
+  @IsOptional()
+  @IsUUID()
+  bookingId?: string;
 }
 
 /**

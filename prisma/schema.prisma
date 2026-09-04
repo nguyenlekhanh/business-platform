@@ -426,6 +426,7 @@ model Order {
   payments Payment[]
   posSale  PosSale?
   resultOfOperations PosOperation[]
+  bookings Booking[]
 
   @@index([tenantId])
   @@index([tenantId, createdAt, id])
@@ -792,6 +793,7 @@ model Booking {
   tenantId    String
   serviceId   String
   customerId  String?
+  orderId     String?
   startAt     DateTime
   endAt       DateTime
   status      BookingStatus @default(BOOKED)
@@ -802,12 +804,14 @@ model Booking {
   tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   service  Service  @relation(fields: [serviceId], references: [id], onDelete: Restrict)
   customer Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  order    Order?   @relation(fields: [orderId], references: [id], onDelete: Restrict)
 
   @@index([tenantId])
   @@index([tenantId, createdAt, id])
   @@index([tenantId, serviceId, startAt, id])
   @@index([serviceId])
   @@index([customerId])
+  @@index([orderId])
 }
 
 // ---------- identity ----------

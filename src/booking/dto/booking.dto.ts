@@ -94,4 +94,8 @@ export class BookingListQueryDto extends PageQueryDto {
   @IsOptional()
   @IsUUID()
   customerId?: string;
+
+  @IsOptional()
+  @IsUUID()
+  orderId?: string;
 }

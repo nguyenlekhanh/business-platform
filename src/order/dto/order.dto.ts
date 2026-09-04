@@ -8,6 +8,7 @@ import {
   Max,
   Min,
   ValidateNested,
+  IsUUID,
 } from 'class-validator';
 import { IsEnum } from 'class-validator';
 import { OrderStatus } from '@prisma/client';
@@ -25,10 +26,12 @@ export class OrderItemInputDto {
 }
 
 /**
- * Create order payload — Phase 3 U6.
+ * Create order payload — Phase 3 U6 + Phase 5 P5-U5.
  * Either provide `items` for direct order, or send empty/no items to checkout
  * own OPEN cart. `customerId` optional, same-tenant validated.
  * Status is never client-writable (whitelist rejects it).
+ * `bookingId` optional (P5-U5): link this order to an existing Booking.
+ * The link is established atomically in the same transaction.
  */
 export class CreateOrderDto {
   @IsOptional()
@@ -41,6 +44,10 @@ export class CreateOrderDto {
   @IsString()
   @IsNotEmpty()
   customerId?: string;
+
+  @IsOptional()
+  @IsUUID()
+  bookingId?: string;
 }
 
 export class OrderListQueryDto extends PageQueryDto {

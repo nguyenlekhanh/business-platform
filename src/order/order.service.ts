@@ -29,7 +29,7 @@ const CUSTOMER_NOT_FOUND = 'Customer not found';
 const NOT_PENDING = 'Only pending orders can be cancelled';
 
 /**
- * INTERNAL-ONLY order-creation options — Phase 4 P4-U3.
+ * INTERNAL-ONLY order-creation options — Phase 4 P4-U3 + Phase 5 P5-U5.
  *
  * `inventoryScope` selects the stock pool T1 decrements and T3 restocks:
  *   - 'global' (default): the tenant-global pool — the exact Phase 3
@@ -38,6 +38,11 @@ const NOT_PENDING = 'Only pending orders can be cancelled';
  *     orchestration, which derives the store from the authenticated
  *     PosSession -> PosDevice (never the client).
  *
+ * `bookingId` (P5-U5): optional Booking to link to the created Order.
+ * The link is established atomically in the same transaction using a
+ * conditional UPDATE Booking SET orderId WHERE orderId IS NULL.
+ * Cross-tenant link fails deterministically (tenant scoping + FK).
+ *
  * This parameter is server-internal: CreateOrderDto is untouched, so no
  * HTTP client can select a store. Cancellation resolves the SAME pool
  * deterministically: a POS order restocks its PosSale-provenance store;
@@ -45,6 +50,7 @@ const NOT_PENDING = 'Only pending orders can be cancelled';
  */
 export interface CreateOrderOptions {
   inventoryScope?: { kind: 'global' } | { kind: 'store'; storeId: string };
+  bookingId?: string;
 }
 
 export interface OrderItemSummary {
@@ -93,6 +99,7 @@ export class OrderService {
       options?.inventoryScope?.kind === 'store'
         ? options.inventoryScope.storeId
         : null;
+    const bookingId: string | null = options?.bookingId ?? null;
     let itemsInput: Array<{ variantId: string; quantity: number }>;
     let cartToConvertId: string | null = null;
 
@@ -201,6 +208,19 @@ export class OrderService {
           subtotalMinor: subtotal,
         },
       });
+
+      // P5-U5: Conditionally link the Booking to this Order (idempotent)
+      if (bookingId) {
+        const updatedBooking = await tx.booking.updateMany({
+          where: { id: bookingId, orderId: null },
+          data: { orderId: order.id },
+        });
+        if (updatedBooking.count === 0) {
+          throw new ConflictException(
+            'Booking already linked to another order',
+          );
+        }
+      }
 
       for (const [vid, qty] of aggregated.entries()) {
         const variant = variantMap.get(vid)!;
