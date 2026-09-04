@@ -1,0 +1,421 @@
+=======================================================================
+ PHASE 5 — BOOKING / SERVICE
+ P5-U5 — COMMERCE INTEGRATION
+ DISCOVERY & DECISION GATE REPORT (READ-ONLY — NO IMPLEMENTATION)
+=======================================================================
+
+Checkpoint : Phase 5, Unit 5 Discovery / Decision Gate (pre-implementation)
+Date       : 2026-09-02
+Status     : DISCOVERY COMPLETE — analysis documented; unresolved
+             business decisions explicitly identified; NO production
+             code, schema, migrations, APIs, DTOs, or RBAC created.
+Baseline   : Phase 4 frozen at 7365acf; P5-U4 complete at a0b4103;
+             HEAD = origin/main; working tree clean.
+             Unit tests: 826/826; Integration: 733/733.
+Governing
+documents : docs/phase5_discovery_report.txt, docs/phase5_decision_gate.txt,
+            docs/phase5_p5u1_report.txt, docs/phase5_p5u2_decision_gate.txt,
+            docs/phase5_p5u4_report.txt, docs/phase-progress.md,
+            Phase 3 U9 final report, Phase 4 U9 final report,
+            actual repository source code.
+
+=======================================================================
+1. REPOSITORY BASELINE
+=======================================================================
+This discovery operates against the following frozen, verified baseline:
+
+- Phase 3 (Core Commerce) frozen at 2e2b80a, re-verified at U9 gate.
+- Phase 4 (POS + Offline Sync) frozen at 7365acf, re-verified at U9 gate.
+- P5-U1 (Service Catalog) complete at cf6751d — tenant-scoped Service
+  entity with DRAFT|ACTIVE|ARCHIVED status, composite unique
+  (tenantId, name), no pricing, no duration.
+- P5-U2 Decision Gate complete at 8aba32d — Architecture A
+  (Service-Catalog Booking) approved:
+  - B1 = Option A: Booking = Service + time interval (no staff, no resource)
+  - B11 = Option A: Tenant-wide booking scope
+  - B12 = Model A: Service remains tenant-scoped
+  - B13 = Option B: Customer optional/nullable (Order walk-in precedent)
+  - B14 = Sub-option i: Cross-store customer allowed
+  - B16 = Collapsed: No staff model
+- P5-U4 (Booking Lifecycle) complete at a0b4103:
+  - Booking model: id, tenantId, serviceId, customerId?, startAt, endAt,
+    status (BOOKED|CONFIRMED|ACTIVE|COMPLETED|CANCELLED|NO_SHOW)
+  - EXCLUDE constraint on (serviceId, tstzrange) WHERE status IN
+    ('BOOKED','CONFIRMED','ACTIVE')
+  - API: GET /bookings, POST /bookings, PATCH /bookings/:id
+  - RBAC: booking:read, booking:create, booking:manage
+
+Explicitly NOT implemented in P5-U4 (verified absent):
+- Pricing, Payment, Order links
+- Staff, Provider, Resource, Schedule, Availability, Duration
+- Deletion semantics, Store-scoping, Customer-store membership
+
+=======================================================================
+2. EXISTING ORDER CONTRACT (PHASE 3 U6)
+=======================================================================
+REPOSITORY FACT:
+- Order model: id, tenantId, userId (creator), customerId?, status
+  (PENDING|PAID|CANCELLED), currency (Char(3)), subtotalMinor (BigInt),
+  cancelledAt?, timestamps.
+- State machine: PENDING → PAID (via payment capture tx) |
+  PENDING → CANCELLED (POST /orders/:id/cancel, restocks).
+  PAID is terminal in Phase 3; cancelling PAID → 409.
+- Status is NEVER client-writable (whitelist rejects status field).
+- OrderItem: immutable snapshots at creation — productName, variantName,
+  sku, quantity, currency, unitAmountMinor, lineTotalMinor.
+  FK to ProductVariant RESTRICT (history survives variant deletion).
+- Order N-1 Customer (nullable FK RESTRICT — P2003 → 409 if orders exist).
+- Order N-1 User (creator).
+- T1 (create): variants ACTIVE + uniform-currency prices + guarded
+  stock decrement + create Order + OrderItems + cart CONVERTED.
+  All-or-nothing via interactive transaction.
+- T3 (cancel): guarded PENDING→CANCELLED + restock increments.
+- Cross-module access via services; order-service touches other
+  models inside its transaction (atomicity) — documented per-call.
+
+=======================================================================
+3. EXISTING PAYMENT CONTRACT (PHASE 3 U7)
+=======================================================================
+REPOSITORY FACT:
+- Payment model: id, tenantId, orderId, status
+  (PROCESSING|CAPTURED|FAILED), method (free-form string, e.g. CASH/CARD),
+  amountMinor (BigInt), currency (Char(3)), timestamps.
+- State machine: PROCESSING → CAPTURED (T2: also flips Order PENDING→PAID
+  atomically) | PROCESSING → FAILED (Order stays PENDING).
+  CAPTURED/FAILED are terminal and immutable.
+- Idempotency: re-capture of CAPTURED returns 200 no-op; FAILED cannot
+  capture (409); CAPTURED cannot fail (409).
+- T5 create: only for PENDING Order with no existing CAPTURED payment.
+  Multiple PROCESSING payments allowed (documented rule).
+- T2 capture: guarded updateMany PROCESSING→CAPTURED + Order PENDING→PAID
+  (count==1 both, rollback on 0). T2 fail: Order untouched.
+- Simulated gateway only (approved D4): capture/fail are permission-guarded
+  staff actions; no external providers, webhooks, refunds.
+- Idempotent terminal replays proven; concurrent capture/fail races
+  arbitrated by guarded updates.
+
+=======================================================================
+4. EXISTING INVENTORY CONTRACT (PHASE 3 U4, P4-U3)
+=======================================================================
+REPOSITORY FACT:
+- Inventory: single pool per variant (Phase 3); P4-U3 added store-scoped
+  pools via nullable storeId (Option A approved D2).
+- Partial unique indexes: (variantId) WHERE storeId IS NULL (global
+  pool) + (storeId, variantId) WHERE storeId IS NOT NULL (store pools).
+- Mutations: atomic guarded updateMany with quantityOnHand >= needed.
+  DB CHECK quantityOnHand >= 0. Decrement-on-order / restock-on-cancel.
+- Concurrency: racing orders/cancels arbitrated by guarded updates.
+  Exactly one winner; no oversell.
+- POS sales (P4-U2) consume store-scoped pool via PosSale provenance.
+  Offline sales (P4-U6) CASH-only, sync runs T5+T2 back-to-back.
+- NO inventory link to services yet — B20 unresolved.
+
+=======================================================================
+5. EXISTING SERVICE / PRICE CONTRACT (P5-U1)
+=======================================================================
+REPOSITORY FACT:
+- Service: tenant-scoped catalog entity ONLY. Fields: id, tenantId,
+  name (unique/tenant), description?, status (DRAFT|ACTIVE|ARCHIVED),
+  timestamps. @@unique([tenantId, name]).
+- NO pricing fields (B23: NO pricing). NO duration (B5: NO duration).
+- NO staffId, resourceId, bookingId, scheduleId, availabilityId.
+- Pricing model (Product/Variant/Price): Variant 1-N Price.
+  Price: variantId, currency (Char(3)), amountMinor (BigInt).
+  @@unique([variantId, currency]) — one CURRENT price per pair; upsert
+  overwrites, NO history. OrderItem snapshots price at creation.
+- Service currently has NO Price relation. B23 = NO pricing in P5-U1.
+
+=======================================================================
+6. BOOKING CONTRACT FROM P5-U4
+=======================================================================
+REPOSITORY FACT (Architecture A — Service-Catalog Booking, approved):
+- Booking = Service + time interval. No staff, no resource.
+- Fields: id, tenantId, serviceId, customerId?, startAt, endAt,
+  status (BOOKED|CONFIRMED|ACTIVE|COMPLETED|CANCELLED|NO_SHOW),
+  timestamps.
+- Customer: optional/nullable (Order walk-in precedent). RESTRICT FK.
+- EXCLUDE constraint: (serviceId, tstzrange) WHERE status IN
+  ('BOOKED','CONFIRMED','ACTIVE') — DB-authoritative overlap guard.
+- CHECK(endAt > startAt) at DB level.
+- API: GET /bookings (keyset), POST /bookings (create|manage),
+  PATCH /bookings/:id (manage). No DELETE (soft-retire via CANCELLED).
+- RBAC: booking:read (GET), booking:create|manage (POST), booking:manage (PATCH).
+- Customer optional/nullable (Order walk-in precedent). Cross-store
+  customer allowed (tenant-wide Customer).
+
+=======================================================================
+7. CROSS-DOMAIN INTEGRATION OPTIONS
+=======================================================================
+
+INFERENCE: The repository provides TWO proven templates for cross-domain
+links:
+1. PosSale pattern (P4-U2): additive provenance link (Order→PosSale)
+   without touching Order/Payment state machines. PosSale captures
+   device/session/store/cashier provenance; Order/Payment state machines
+   remain untouched.
+2. Customer→Order pattern (Phase 3 D1): nullable FK + RESTRICT + P2003
+   → 409. Customer is tenant-wide, shared across stores.
+
+INFERENCE: For Booking↔Commerce, the repository supports these
+architectural primitives:
+- Additive FK with RESTRICT (Customer→Order, PosSale→Order)
+- Provenance table for cross-domain provenance (PosSale)
+- Order/Payment state machines are FROZEN and must not be modified
+- No refunds exist anywhere (Phase 3 §7, Phase 4: no refunds)
+
+=======================================================================
+8. CROSS-DOMAIN INTEGRATION OPTIONS
+=======================================================================
+
+OPTION A — NO COMMERCE LINK (Minimal)
+-------------------------------------
+Booking remains purely temporal (Service + time). No Order, no Payment,
+no pricing. Commerce integration = zero.
+- Pros: Minimal, keeps domains separated, zero new decisions.
+- Cons: No monetization path; Booking is purely temporal reservation.
+
+OPTION B — ADDITIVE PROVENANCE LINK (PosSale Pattern)
+-----------------------------------------------------
+Booking creates/references an Order via additive provenance table
+(like PosSale). Booking remains temporal; Order handles commerce.
+- Pros: Reuses proven additive pattern; Order/Payment state machines
+  untouched; Payment timing/refunds decided at Order level.
+- Cons: Requires new provenance table; Booking→Order link optional
+  (nullable FK); does not answer "who pays when".
+
+OPTION C — BOOKING CREATES ORDER (Synchronous)
+----------------------------------------------
+Booking creation directly creates Order (+ Payment) in same
+transaction. Booking holds optional orderId (FK).
+- Pros: Direct monetization; atomic creation.
+- Cons: Couples temporal domain to financial domain; Order/Payment
+  logic invoked from Booking service; retry/failure semantics complex;
+  does a Booking *require* payment?
+
+OPTION D — ORDER REFERENCES BOOKING (Reverse)
+---------------------------------------------
+Order optionally references a Booking (like PosSale). Booking is
+created first; Order created later (checkout, POS, etc.) and
+optionally links to Booking.
+- Pros: Booking remains pure temporal; Order is the commerce root;
+  multiple Bookings could theoretically link to one Order (1:N?).
+- Cons: Booking must exist before Order; who creates Booking?
+
+=======================================================================
+9. RECOMMENDED MINIMAL OPTION
+=======================================================================
+
+REPOSITORY FACT: The PosSale pattern is the ONLY existing cross-domain
+link in the repository. It is additive, non-invasive, and preserves
+Order/Payment state machines.
+
+RECOMMENDATION: Option B — Additive Provenance Link (Booking→Order
+via new BookingSale/BookingProvenance table).
+- Booking remains temporal/catalog domain (no money, no payment).
+- Optional link to Order created when customer pays.
+- Order/Payment state machines untouched (FROZEN).
+- Payment timing/refunds decided at Order level (not Booking).
+- Cross-store customer already allowed (P5-U2 B14 sub-option i).
+
+ARCHITECTURAL RECOMMENDATION: The MINIMUM required cross-domain
+relationship is an OPTIONAL, ADDITIVE provenance link from Booking
+to Order. This requires NO new decisions about pricing, payment
+timing, refunds, or inventory — those remain at Order level.
+
+=======================================================================
+10. REQUIRED NEW DECISIONS
+=======================================================================
+
+The following MUST be explicitly approved before P5-U5 implementation:
+
+| Decision | Question | Options | Required For |
+|----------|----------|---------|--------------|
+| C1 | Should Booking create/reference an Order? | No link / Optional FK (Booking→Order) / Required FK / Order references Booking | P5-U5 schema |
+| C2 | Who creates the Order? | Booking creates Order / Order created later (checkout/POS) / No Order | P5-U5 flow |
+| C3 | Payment timing | Before booking (prepay) / At booking / At check-in (ACTIVE) / At completion (COMPLETED) / Manual / Out of scope | P5-U5 flow |
+| C4 | Cancellation semantics | Cancel = status only (no refund) / Cancel triggers Order cancel / Cancel triggers refund | P5-U5 schema |
+| C5 | Refunds | No refunds (status only) / Refund via Payment (NEW) / Refund via Order | P5-U5 schema |
+| C6 | Pricing | No pricing / Flat per-service price / Per-duration / Per-staff / Dynamic | P5-U5 schema |
+| C7 | Inventory | No consumption / Consumes variant stock / Consumes capacity | P5-U5 schema |
+| C8 | Idempotency | Client key (PosOperation) / Natural key / No dedup | P5-U5 flow |
+
+=======================================================================
+11. TRANSACTION BOUNDARIES
+=======================================================================
+
+REPOSITORY FACT: Existing transaction patterns (all interactive,
+tenant-scoped, top-level writes only, no nested relation writes):
+
+T1 (Order create): validate variants ACTIVE + uniform-currency prices
+  + guarded stock decrement + create Order + OrderItems + cart CONVERTED.
+  All-or-nothing via interactive transaction.
+
+T2 (Payment capture): guarded PROCESSING→CAPTURED + Order PENDING→PAID
+  (count==1 both, rollback on 0). Idempotent terminal replays.
+
+T3 (Order cancel): guarded PENDING→CANCELLED + restock increments.
+
+T5 (Payment create): Order PENDING + no CAPTURED payment (multiple
+PROCESSING allowed).
+
+PosSale (P4-U2): thin orchestration over T1+T5+T2.
+
+INFERENCE: For Booking↔Order linkage, the MINIMAL atomic boundary is:
+- Booking creation is independent (no Order).
+- Order creation (if triggered by Booking) uses existing T1 transaction
+  — Booking just provides the serviceId/customerId/startAt/endAt as
+  input to T1.
+- NO new transaction boundary spanning Booking + Order + Payment
+  unless explicitly approved.
+
+PROPOSED DECISION: The Booking→Order link is created OUTSIDE the
+Booking transaction. Booking is created first (its own transaction).
+Order creation happens later (checkout, POS, webhook) using existing
+T1. The Booking→Order link is additive (nullable FK or provenance
+table), created when Order is created.
+
+=======================================================================
+12. IDEMPOTENCY / CONCURRENCY
+=======================================================================
+
+REPOSITORY FACT: Two proven patterns exist:
+1. EXCLUDE constraint (Reservation, Booking) — DB-authoritative
+   overlap arbitration. Zero application logic.
+2. Guarded updateMany + client idempotency key (PosOperation) —
+   deduplication at sync/retry.
+
+INFERENCE: For Booking→Order linkage, idempotency must be defined:
+- If Order created from Booking: need natural key (BookingId?) or
+  client idempotency key to prevent duplicate Order creation on retry.
+- If multiple payments per Booking: T5 already allows multiple
+  PROCESSING payments; only one CAPTURED allowed.
+
+PROPOSED DECISION: No new idempotency mechanism in P5-U5. Reuse
+existing patterns: Booking natural key (serviceId + startAt?) for
+Booking creation; Order T5 rules for Payment; client-generated
+idempotency key only if Booking→Order is synchronous.
+
+=======================================================================
+13. TENANT / RBAC INVARIANTS
+=======================================================================
+
+REPOSITORY FACT: All cross-domain enforcement already exists:
+- Tenant isolation: centralized Prisma extension, fail-closed,
+  uniform 404. Customer/Order/Payment/Booking all in
+  TENANT_SCOPED_MODELS.
+- RBAC: additive keys only; admin+=all *_MANAGE; employee+=_READ
+  + specific creates; owner=semantic-all.
+- Creating never implies executing (F8/D7 precedent: booking:create
+  does not imply booking:manage).
+
+INFERENCE: Any new cross-domain keys (booking:*, order:*, payment:*)
+must follow existing patterns. No new security model needed.
+
+=======================================================================
+13. FAILURE / COMPENSATION SEMANTICS
+=======================================================================
+
+REPOSITORY FACT: Existing compensation patterns:
+- Order cancel → restock (exactly once, guarded).
+- Payment capture fail → rollback (no partial CAPTURED/CANCELLED).
+- Payment fail → Order stays PENDING, no stock change.
+- PosSale sync reject → intent stays PENDING/REJECTED, zero mutation.
+- NO refunds anywhere (Phase 3, Phase 4).
+
+INFERENCE: If Booking cancellation triggers Order cancellation, it
+must use existing T3 (guarded CANCEL + restock). No new refund
+mechanism unless explicitly approved (B19: no refunds unless
+explicitly approved).
+
+RECOMMENDATION: Booking cancellation = status change only (CANCELLED).
+Order cancellation (if linked) uses existing T3. No refund logic
+in P5-U5 unless B19 explicitly approved.
+
+=======================================================================
+14. EXPLICITLY DEFERRED FEATURES
+=======================================================================
+The following are SAFE TO DEFER (P5-U5 does not require them):
+- B3/B15: Booking lifecycle beyond current statuses (no-show,
+  expiration, reschedule) — P5-U6+.
+- B4/B8: Availability/schedule/hours — P5-U3.
+- B5: Duration field (derived from startAt/endAt).
+- B6/B7: Staff/resource schedules — only if B1=Option B.
+- B9: Capacity >1 — only if B1=Option B.
+- B10: Timezone — UTC-only (F9 evidence) unless explicitly approved.
+- B12/B14: Service/Customer store ownership — already decided.
+- B17/B18/B19: Full payment/refund semantics — optional, only if
+  commerce link approved.
+- B20: Inventory consumption — default "none".
+- B22: EXCLUDE target already frozen (serviceId).
+
+=======================================================================
+15. P5-U5 IMPLEMENTATION SCOPE PROPOSAL
+=======================================================================
+
+MINIMUM SCOPE (Architecture A + Option B provenance):
+1. Add optional `orderId` FK to Booking (nullable, RESTRICT, P2003→409).
+   OR additive `BookingProvenance` table (Booking 1-1 Order, like PosSale).
+2. API: POST /bookings/:id/checkout → creates Order (T1) + links to
+   Booking. Requires booking:manage + order:create.
+3. Optional: GET /bookings/:id/order → returns linked Order.
+4. NO Payment/Pricing/Inventory/Refund logic in Booking module.
+5. RBAC: reuse booking:manage for checkout; order:create for Order.
+
+EXPLICITLY EXCLUDED from P5-U5:
+- Pricing, payment timing, refunds (B17/B18/B19)
+- Inventory consumption (B20)
+- Staff/resource assignment
+- Availability/scheduling
+- Store-scoping (B11/B12/B14 already decided)
+- Duration field
+- Delete endpoint
+
+=======================================================================
+16. TEST / VERIFICATION PLAN
+=======================================================================
+- Unit: DTO validation (whitelist rejects orderId on create; orderId
+  optional on PATCH); service specs (fail-closed, orderId nullable,
+  RESTRICT 409, idempotent checkout).
+- Integration: 401/403 gates; RBAC matrix (booking:manage+order:create);
+  cross-tenant IDOR 404; idempotent checkout (Booking→Order link
+  idempotent); concurrent checkout races; foreign Order reference
+  rejected 404; soft-retirement via CANCELLED status.
+- Full regression: all 826 unit + 733 integration pass.
+
+=======================================================================
+17. GOVERNANCE / OPEN QUESTIONS
+=======================================================================
+
+UNRESOLVED — REQUIRE HUMAN APPROVAL:
+1. C1: Booking→Order link? (None / Optional FK / Required FK / Reverse)
+2. C2: Who creates Order? (Booking creates / Later checkout / None)
+3. C3: Payment timing? (Prepay / At booking / At check-in / At completion / Manual / Out of scope)
+4. C4: Cancellation semantics? (Status only / Order cancel / Refund)
+5. C5: Refunds? (None / Via Payment / Via Order)
+6. C6: Pricing? (None / Flat / Duration / Staff / Dynamic)
+7. C8: Idempotency? (Natural key / Client key / None)
+8. B10: Timezone — UTC-only (F9 evidence) or per-store business tz?
+   (Decision gate §9: "REQUIRES USER DECISION before P5-U3")
+
+DEFERRED (not required for P5-U5):
+- B3/B15: Full lifecycle (no-show, reschedule, expiration)
+- B4/B8: Availability/schedule/hours
+- B6/B7: Staff/resource schedules
+- B9: Capacity >1
+- B17/B18/B19: Full payment/refund semantics
+- B20: Inventory consumption
+- B22: Already frozen (serviceId EXCLUDE target)
+
+=======================================================================
+18. EXPLICIT STATEMENT
+=======================================================================
+NO production implementation was performed during this discovery.
+No Booking↔Order links, pricing fields, payment triggers, inventory
+consumption, refund logic, staff models, availability models, or
+schedule models were created. No schema changes, migrations, APIs,
+DTOs, RBAC keys, or tests were created. The only artifacts are this
+report and the decision-gate checkpoint entry in docs/phase-progress.md.
+
+=======================================================================
+END OF DISCOVERY / DECISION GATE
+=======================================================================
