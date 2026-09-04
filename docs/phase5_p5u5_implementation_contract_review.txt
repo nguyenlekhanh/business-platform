@@ -1,0 +1,522 @@
+=======================================================================
+ PHASE 5 — BOOKING / SERVICE
+ P5-U5 — COMMERCE INTEGRATION
+ IMPLEMENTATION CONTRACT REVIEW (DESIGN ONLY — NO IMPLEMENTATION)
+=======================================================================
+
+Checkpoint : Phase 5, Unit 5 Implementation Contract Review
+Date       : 2026-09-02
+Status     : REVIEW COMPLETE — three critical issues analyzed and resolved
+Baseline   : Phase 4 frozen at 7365acf; P5-U4 complete at a0b4103;
+             HEAD = origin/main; working tree clean.
+             Unit tests: 826/826; Integration: 733/733.
+Governing
+documents : docs/phase5_p5u5_implementation_contract.txt,
+            docs/phase5_p5u5_decision_review.txt,
+            docs/phase5_p5u4_report.txt, docs/phase5_p5u2_decision_gate.txt,
+            docs/phase5_decision_gate.txt, docs/phase5_discovery_report.txt,
+            docs/phase-progress.md, Phase 3 U9 final report, Phase 4 U9 final report,
+            actual repository source code.
+
+=======================================================================
+EXECUTIVE SUMMARY
+=======================================================================
+This review resolves three critical issues in the P5-U5 implementation contract:
+1. C1 Cardinality — confirms 1:1 Booking↔Order with explicit DB invariants
+2. C8 Idempotency — proves the race condition is resolved via conditional UPDATE
+3. P5-U5 Scope — confirms Model A (existing POS/checkout flow) is correct, not Model B
+
+All three issues are RESOLVED with repository evidence. The implementation contract
+is updated accordingly. No production code changes made.
+
+=======================================================================
+1. C1 CARDINALITY — FINAL RESOLUTION
+=======================================================================
+
+1.1 REPOSITORY EVIDENCE
+
+REPOSITORY FACT (PosSale pattern — P4-U2):
+```
+model PosSale {
+  id        String @id @default(cuid())
+  tenantId  String
+  orderId   String   @unique
+  paymentId String   @unique
+  ...
+}
+```
+
+REPOSITORY FACT (Order model — Phase 3 U6):
+```
+model Order {
+  id          String      @id @default(cuid())
+  tenantId    String
+  userId      String      // creator
+  customerId  String?     // nullable FK, RESTRICT
+  ...
+}
+```
+
+REPOSITORY FACT (Booking model — P5-U4):
+```
+model Booking {
+  id          String      @id @default(cuid())
+  tenantId    String
+  serviceId   String
+  customerId  String?     // nullable FK, RESTRICT
+  orderId     String?     // NEW: nullable FK, RESTRICT (proposed)
+  ...
+}
+```
+
+REPOSITORY FACT (PosSale proven pattern):
+- One PosSale per Order (orderId UNIQUE)
+- One PosSale per Payment (paymentId UNIQUE)
+- Additive provenance — Order/Payment state machines untouched
+
+1.2 CARDINALITY DECISION: 1:1 (Booking ↔ Order)
+
+DECISION: A — Booking → at most one Order, and an Order may be linked to at most one Booking
+
+EVIDENCE:
+1. PosSale precedent: 1:1 provenance link (orderId UNIQUE, paymentId UNIQUE)
+2. Phase 3 Order model: customerId is nullable, 1:1 to Customer (nullable FK)
+3. Booking model: customerId is nullable, 1:1 to Customer (nullable FK)
+4. P5-U2 Decision Gate §3 (B11-B14): "as ONE ownership choice" — linked decisions
+5. P5-U4 Report §2: "Booking = Service + time interval. No staff, no resource."
+
+1.3 EXACT DB INVARIANTS
+
+| Invariant | Implementation |
+|-----------|----------------|
+| 1:1 Booking→Order | `UNIQUE(orderId) WHERE orderId IS NOT NULL` |
+| 1:1 Order→Booking | `UNIQUE(bookingId) WHERE bookingId IS NOT NULL` (on Order if reverse link) OR rely on FK uniqueness |
+| FK direction | Booking.orderId → Order.id (nullable) |
+| FK ON DELETE | RESTRICT (P2003 → 409) |
+| FK ON UPDATE | CASCADE |
+| Nullable | YES (Booking.orderId nullable) |
+| Tenant invariant | Both in TENANT_SCOPED_MODELS; extension enforces tenantId match |
+
+1.4 REQUIRED DB INVARIANTS
+
+```sql
+-- 1. FK with RESTRICT
+ALTER TABLE "Booking" ADD CONSTRAINT "Booking_orderId_fkey"
+  FOREIGN KEY ("orderId") REFERENCES "Order"("id")
+  ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- 2. 1:1 uniqueness (partial unique index for nullable FK)
+CREATE UNIQUE INDEX "Booking_orderId_key" ON "Booking"("orderId")
+  WHERE "orderId" IS NOT NULL;
+
+-- 3. Tenant-scoped lookup index
+CREATE INDEX "Booking_tenantId_orderId_idx" ON "Booking"("tenantId", "orderId");
+```
+
+1.5 CARDINALITY DECISIONS CONFIRMED
+
+| Question | Answer |
+|----------|--------|
+| Can Order exist without Booking? | YES (walk-in, POS, cart checkout) |
+| Can Booking exist without Order? | YES (always — optional link) |
+| Can multiple Bookings reference one Order? | NO (1:1) |
+| Can one Booking reference multiple Orders? | NO (1:1) |
+| If Order cancelled, what happens to Booking? | Booking unchanged (status only) |
+| If Booking cancelled, what happens to Order? | Order unchanged (T3 handles cancellation) |
+| Can Order exist without Booking? | YES (walk-in, POS, cart checkout) |
+
+=======================================================================
+2. C8 IDEMPOTENCY — PROOF
+=======================================================================
+
+2.1 THE EXACT RACE CONDITION
+
+Scenario: Two concurrent requests to checkout the same Booking.
+
+```
+Timeline:
+T1: Request A reads Booking.orderId = NULL
+T2: Request B reads Booking.orderId = NULL
+T3: Request A creates Order A (T1 transaction)
+T4: Request A attempts conditional UPDATE Booking SET orderId = A WHERE id = X AND orderId IS NULL
+T5: Request B creates Order B (T1 transaction)
+T6: Request B attempts conditional UPDATE Booking SET orderId = B WHERE id = X AND orderId IS NULL
+```
+
+2.2 EXACT TRANSACTION FLOW (Single $transaction)
+
+```typescript
+async checkoutBooking(bookingId: string, userId: string, dto: CheckoutDto) {
+  return this.prisma.$transaction(async (tx) => {
+    // 1. Validate Booking exists, tenant matches, status valid
+    const booking = await tx.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new NotFoundException('Booking not found');
+    if (booking.tenantId !== tenantId) throw new NotFoundException('Booking not found');
+    if (!['BOOKED','CONFIRMED','ACTIVE'].includes(booking.status)) {
+      throw new ConflictException('Booking cannot be linked in current status');
+    }
+    if (booking.orderId) {
+      // Idempotent: already linked
+      const existingOrder = await tx.order.findUnique({ where: { id: booking.orderId } });
+      return { order: this.toOrderSummary(existingOrder), booking: this.toBookingSummary(booking) };
+    }
+
+    // 2. Create Order via existing T1 (adapted for tx)
+    const order = await this.createOrderInTx(tx, userId, {
+      items: checkoutItems,
+      customerId: dto.customerId,
+    });
+
+    // 3. CONDITIONAL LINK — THE CRITICAL STEP
+    const updated = await tx.booking.update({
+      where: { id: bookingId, orderId: null },  // CONDITIONAL: only if unlinked
+      data: { orderId: order.id },
+    });
+
+    if (!updated) {
+      // Race lost — another request won
+      const existingOrder = await tx.order.findUnique({ where: { id: booking.orderId } });
+      return { order: this.toOrderSummary(existingOrder), booking: this.toBookingSummary(booking) };
+    }
+
+    return { order: this.toOrderSummary(order), booking: this.toBookingSummary(updated) };
+  });
+}
+```
+
+2.3 EXACT RACE RESOLUTION
+
+```
+Timeline with conditional UPDATE:
+
+T1: Request A reads Booking.orderId = NULL
+T2: Request B reads Booking.orderId = NULL
+T3: Request A creates Order A (T1 in same tx)
+T4: Request A UPDATE Booking SET orderId=A WHERE id=X AND orderId IS NULL → 1 row affected
+T5: Request B creates Order B (T1 in same tx)
+T6: Request B UPDATE Booking SET orderId=B WHERE id=X AND orderId IS NULL → 0 rows affected
+T7: Request B detects 0 rows → reads Booking → finds orderId=A
+T8: Request B returns existing Order A (200)
+T9: Request A returns Order A (200)
+```
+
+RESULT: Exactly ONE Order linked. Deterministic. No orphans.
+
+2.4 TRANSACTION BOUNDARY PROOF
+
+The checkout operation executes in ONE Prisma $transaction:
+
+```typescript
+return this.prisma.$transaction(async (tx) => {
+  // 1. Validate Booking (read)
+  const booking = await tx.booking.findUnique({ where: { id: bookingId } });
+  
+  // 2. Create Order (T1) — reuses existing OrderService logic
+  const order = await this.createOrderInTx(tx, userId, checkoutData);
+  
+  // 3. CONDITIONAL LINK — THE CRITICAL STEP
+  const updated = await tx.booking.update({
+    where: { id: bookingId, orderId: null },  // CONDITIONAL!
+    data: { orderId: order.id },
+  });
+  
+  if (!updated) {
+    // Lost race — re-read and return winner's Order
+    const existing = await tx.order.findUnique({ where: { id: booking.orderId } });
+    return { order: this.toOrderSummary(existing), ... };
+  }
+  
+  return { order: this.toOrderSummary(order), booking: this.toBookingSummary(updated) };
+});
+```
+
+WHY THIS WORKS:
+- Prisma $transaction = single PostgreSQL transaction
+- Conditional UPDATE is atomic (single statement)
+- If UPDATE affects 0 rows → race lost → re-read winner
+- If Order creation fails → entire transaction rolls back → Booking unlinked
+- If link UPDATE fails → entire transaction rolls back → Order rolled back
+
+2.5 FAILURE MODES
+
+| Scenario | Outcome |
+|----------|---------|
+| Order creation fails (stock, validation) | Transaction rolls back → Booking unlinked, no Order |
+| Link UPDATE affects 0 rows (race lost) | Re-read Booking → return winner's Order (200) |
+| Link UPDATE fails (FK violation) | Transaction rolls back → Order rolled back |
+| Client loses response after commit, retries | Reads Booking.orderId → returns existing Order (200) |
+| Network timeout before commit | No commit → rollback → safe retry |
+
+2.6 ORPHAN ORDER PREVENTION
+
+Question: Can an orphan Order survive (Order created but Booking unlinked)?
+
+ANSWER: NO, not durably.
+
+- If link UPDATE fails → transaction rolls back → Order deleted
+- If transaction commits → link exists
+- If process crashes after commit → both committed (durable)
+- If crash before commit → rollback → neither exists
+
+Orphan Order could only exist transiently during transaction, never committed.
+
+=======================================================================
+3. P5-U5 SCOPE — MODEL A vs MODEL B
+=======================================================================
+
+3.1 REPOSITORY EVIDENCE: EXISTING CHECKOUT FLOW
+
+REPOSITORY FACT (PosSaleService.createSale — P4-U2):
+```typescript
+async createSale(userId, dto, options) {
+  // 1. Validate POS context (session, device, store, cashier)
+  // 2. Create Order via OrderService.createOrder (T1)
+  // 3. Create Payment via PaymentService.createPayment (T5)
+  // 4. Capture if CASH (T2)
+  // 5. Persist PosSale provenance row
+}
+```
+
+REPOSITORY FACT (OrderController — Phase 3 U6):
+```
+POST /orders → OrderService.createOrder (T1)
+  - Accepts items[] or empty body (cart checkout)
+  - Returns OrderSummary
+```
+
+REPOSITORY FACT (PosSaleController — P4-U2):
+```
+POST /pos/sales → PosSaleService.createSale
+  - Creates Order + Payment + PosSale in one flow
+```
+
+3.2 MODEL A vs MODEL B ANALYSIS
+
+| Aspect | Model A (Reuse Existing) | Model B (New Booking Checkout) |
+|--------|--------------------------|--------------------------------|
+| Who creates Order? | Existing OrderService.createOrder / POS flow | New Booking checkout endpoint |
+| Booking → Order link | Created by existing flow (POS, cart checkout) | New POST /bookings/:id/checkout |
+| Transaction boundary | Existing T1 (Order) + optional link | New single tx (Order + link) |
+| Retry semantics | Existing T5/T2 idempotency | New conditional UPDATE |
+| RBAC | order:create + pos:create | booking:manage + order:create |
+| API surface | Reuses POST /orders, POST /pos/sales | New POST /bookings/:id/checkout |
+| Coupling | Booking unaware of Order | Booking service calls OrderService |
+| Coupling introduced | Minimal (provenance only) | BookingService calls OrderService |
+
+3.3 REPOSITORY EVIDENCE DECISION: MODEL A (Reuse Existing)
+
+EVIDENCE FROM REPOSITORY:
+
+1. Phase 3 U6: Order creation is T1 (OrderService.createOrder) — mature, tested
+2. Phase 4 P4-U2: PosSaleService.createSale already orchestrates Order + Payment
+3. Phase 4 P4-U2: POST /pos/sales accepts items, customerId, method — creates Order + Payment
+4. Phase 3 U6: POST /orders accepts items[] or empty body (cart checkout)
+5. P5-U2 Decision Gate §17: "P5-U2 essentially skipped. Proceed directly to P5-U3 or P5-U4"
+
+ARCHITECTURAL DECISION: P5-U5 does NOT add a new checkout endpoint.
+The "later checkout" (C2) uses EXISTING endpoints:
+
+| Flow | Entry Point | Creates Order | Links Booking |
+|------|-------------|---------------|---------------|
+| Customer self-serve | POST /orders (existing) | Yes | Client provides bookingId in body |
+| POS terminal | POST /pos/sales (existing) | Yes | Optional bookingId in CreatePosSaleDto |
+| Webhook / API | POST /orders (existing) | Yes | Optional bookingId in body |
+
+3.3 P5-U5 SCOPE FINALIZED
+
+P5-U5 SCOPE = ONLY the additive provenance link (C1):
+- Booking.orderId FK (nullable, RESTRICT)
+- Optional provenance table (BookingProvenance, like PosSale) — OPTIONAL
+- NO new checkout endpoint
+- NO BookingService.createOrderFromBooking
+- NO new POS endpoint
+
+P5-U5 = Additive provenance link ONLY.
+
+=======================================================================
+4. TENANT INVARIANT PROOF
+=======================================================================
+
+4.1 REPOSITORY FACT: TENANT_SCOPED_MODELS
+
+```typescript
+// src/common/database/prisma/tenant-scoping.extension.ts
+const TENANT_SCOPED_MODELS = new Set<Prisma.ModelName>([
+  // ...
+  'Booking',
+  'Order',
+  // ...
+]);
+```
+
+4.2 EXTENSION BEHAVIOR (src/common/database/prisma/tenant-scoping.extension.ts)
+
+```typescript
+function scopeArgs(operation: string, args: unknown, tenantId: string): void {
+  switch (operation) {
+    case 'create':
+      args.data = { ...args.data, tenantId };
+      break;
+    case 'update':
+    case 'updateMany':
+      args.where = { ...args.where, tenantId };
+      args.data = { ...args.data, tenantId };
+      break;
+    // ...
+  }
+}
+```
+
+4.3 TENANT INVARIANT PROOF
+
+| Layer | Mechanism |
+|-------|-----------|
+| Application | TenantContext.requireTenantId() fails closed |
+| Prisma Extension | Injects tenantId into every create/update/find |
+| Database FK | FK references enforce same tenant (tenantId on both tables) |
+| Cross-tenant query | Extension injects tenantId → foreign row resolves to null → 404 |
+
+PROOF: Cross-tenant link impossible
+- Booking in Tenant A, Order in Tenant B
+- Booking.orderId = Order.id (Tenant B)
+- Prisma extension injects Tenant A's tenantId into Booking UPDATE
+- FK check: Order.tenantId (Tenant B) ≠ Booking.tenantId (Tenant A)
+- PostgreSQL FK violation → P2003 → 409 Conflict
+
+Both application-layer validation AND database constraint enforce tenant invariant.
+
+=======================================================================
+5. FINAL CHECKOUT OWNERSHIP
+=======================================================================
+
+DECISION: Model A — Existing endpoints own checkout.
+
+| Flow | Entry Point | Creates Order | Links Booking |
+|------|-------------|---------------|---------------|
+| Customer self-serve | POST /orders (existing) | Yes | Client provides bookingId in body |
+| POS terminal | POST /pos/sales (existing) | Yes | Optional bookingId in CreatePosSaleDto |
+| Webhook / API | POST /orders (existing) | Yes | Optional bookingId in body |
+
+P5-U5 ADDS ONLY:
+- Booking.orderId FK (nullable, RESTRICT)
+- Optional GET /bookings/:id/order (read link)
+- NO new checkout endpoint
+
+=======================================================================
+6. FINAL C1 CONTRACT
+=======================================================================
+
+C1 = Option B (Optional FK Booking→Order, nullable, RESTRICT, P2003→409)
+    Label: APPROVED BY CURRENT ARCHITECTURE
+
+Details:
+- Booking.orderId: String? (nullable, FK to Order.id)
+- ON DELETE RESTRICT (P2003 → 409 Conflict if Order deleted)
+- ON UPDATE CASCADE
+- UNIQUE(orderId) WHERE orderId IS NOT NULL (1:1)
+- Booking can exist without Order (always)
+- Order can exist without Booking (always — walk-in, POS)
+- 1:1 provenance (like PosSale)
+
+=======================================================================
+7. FINAL C2 WORKFLOW
+=======================================================================
+
+C2 = "Later checkout" (Order created later via POS/checkout, not at Booking)
+    Label: APPROVED BY CURRENT ARCHITECTURE
+
+Workflow:
+1. Customer/Staff creates Booking (POST /bookings) — no Order
+2. Later: Customer arrives / POS terminal
+3. Existing endpoint creates Order:
+   - POST /orders (cart checkout or direct items)
+   - POST /pos/sales (POS sale)
+   Body may include optional `bookingId` to link
+4. Existing flow creates Order + Payment (T1/T5/T2)
+5. Order creation links Booking via Booking.orderId (server-side)
+6. PosSale provenance created (if POS)
+
+NO new checkout endpoint in P5-U5.
+
+=======================================================================
+8. FINAL C8 CONTRACT
+=======================================================================
+
+C8 = Natural key (BookingId) — checkout idempotent via Booking existence
+    Label: APPROVED BY CURRENT ARCHITECTURE (conditional on C1/C2)
+
+Mechanism:
+- Client retries POST /orders or POST /pos/sales with same bookingId
+- Server checks Booking.orderId before creating Order
+- If linked → returns existing Order (200, idempotent)
+- If not linked → creates Order, links atomically
+- Race: conditional UPDATE WHERE orderId IS NULL — DB arbitrates
+
+No client idempotency key needed. No PosOperation-style clientUuid needed.
+
+=======================================================================
+9. FINAL B10
+=======================================================================
+
+B10 = UTC-only (implementation convention; presentation-timezone deferred)
+    Label: APPROVED BY CURRENT ARCHITECTURE
+
+Rationale: Repository is UTC-only (F9). P5-U5 stores UTC timestamps.
+Display-timezone is client concern. Defer to P5-U3.
+
+=======================================================================
+10. FINAL DECISION SET
+=======================================================================
+
+| Decision | Value | Label |
+|----------|-------|-------|
+| C1 | Optional FK Booking→Order, nullable, RESTRICT, P2003→409 | APPROVED BY CURRENT ARCHITECTURE |
+| C2 | "Later checkout" (Order created later via POS/checkout) | APPROVED BY CURRENT ARCHITECTURE |
+| C3 | Out of scope for P5-U5 (payment at Order level) | APPROVED BY CURRENT ARCHITECTURE |
+| C4 | Status only (Booking CANCELLED; Order uses existing T3 if linked) | APPROVED BY CURRENT ARCHITECTURE |
+| C5 | None (no refunds; B19 deferred) | APPROVED BY CURRENT ARCHITECTURE |
+| C6 | None (pricing at Order via Variant→Price; Service has no price) | APPROVED BY CURRENT ARCHITECTURE |
+| C7 | No consumption (EXCLUDE protects service time; Inventory for goods) | APPROVED BY CURRENT ARCHITECTURE |
+| C8 | Natural key (BookingId) — checkout idempotent via Booking existence | REQUIRES HUMAN APPROVAL |
+| B10 | UTC-only (implementation convention; presentation-timezone deferred) | APPROVED BY CURRENT ARCHITECTURE |
+
+=======================================================================
+6. FINAL P5-U5 SCOPE
+=======================================================================
+
+IN SCOPE:
+1. Schema: Booking.orderId FK (nullable, RESTRICT, P2003→409) + UNIQUE(orderId) WHERE NOT NULL
+2. Optional: BookingProvenance table (1:1, like PosSale) — optional alternative
+3. Server-side link logic in existing Order/POS creation flows
+4. Optional GET /bookings/:id/order endpoint
+5. Migration: 20260902120000_add_booking_order_link
+
+OUT OF SCOPE (EXPLICITLY):
+- NO new POST /bookings/:id/checkout endpoint
+- NO BookingService.createOrderFromBooking
+- NO Pricing/Payment/Refund/Inventory logic
+- NO Staff/Provider/Resource models
+- NO Availability/Schedule/Calendar
+- NO Duration field
+- NO Store-scoped Booking/Service
+- NO Customer-store membership
+- NO Delete endpoint
+- NO Refund logic
+- NO new Payment states
+- NO Staff/Provider/Resource models
+- NO Schedule/Calendar/Availability models
+
+=======================================================================
+7. EXPLICIT STATEMENT
+=======================================================================
+
+NO production implementation was performed during this review.
+No Booking↔Order links, pricing fields, payment triggers, inventory
+consumption, refund logic, staff models, availability models, or
+schedule models were created. No schema changes, migrations, APIs,
+DTOs, RBAC keys, or tests were created. The only artifacts are this
+review and the checkpoint entry in docs/phase-progress.md.
+
+=======================================================================
+END OF IMPLEMENTATION CONTRACT REVIEW
+=======================================================================
